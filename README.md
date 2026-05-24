@@ -166,7 +166,7 @@ Note: paste the **contents**, not the path. tauri-action expects the key as a st
 git add src-tauri/tauri.business.conf.json
 git commit -m "chore: bump business to 1.0.1"
 git tag v1.0.1
-git push origin main --tags
+git push origin master --tags
 ```
 
 The workflow then:
