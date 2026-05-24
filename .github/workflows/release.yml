@@ -56,7 +56,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Generate icons
-        run: pnpm tauri icon source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
+        run: pnpm tauri icon src-tauri/source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
 
       - name: Resolve version from config
         id: meta
