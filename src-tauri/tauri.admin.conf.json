@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orcaa Admin",
+  "identifier": "cloud.orcaa.admin.desktop",
+  "version": "1.0.0",
+  "bundle": {
+    "icon": [
+      "icons/admin/32x32.png",
+      "icons/admin/128x128.png",
+      "icons/admin/128x128@2x.png",
+      "icons/admin/icon.ico",
+      "icons/admin/icon.icns"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://orcaa.cloud/desktop/admin/latest.json"
+      ]
+    }
+  }
+}

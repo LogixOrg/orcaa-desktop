@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orcaa",
+  "identifier": "cloud.orcaa.business.desktop",
+  "version": "1.0.0",
+  "bundle": {
+    "icon": [
+      "icons/business/32x32.png",
+      "icons/business/128x128.png",
+      "icons/business/128x128@2x.png",
+      "icons/business/icon.ico",
+      "icons/business/icon.icns"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://orcaa.cloud/desktop/business/latest.json"
+      ]
+    }
+  }
+}

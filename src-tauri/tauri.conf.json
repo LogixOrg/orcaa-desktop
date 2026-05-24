@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "frontendDist": null,
+    "devUrl": null
+  },
+  "app": {
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0NEQxN0ZEMUU5NTMxQjkKUldTNU1aVWUvUmRObEtaSkxsK3VXSUNLNEc3emFVZ0pFNmtTRm54TFlaVWdDYlBnSU1WWWZKNkQK",
+      "endpoints": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg", "app"],
+    "category": "Business",
+    "shortDescription": "Orcaa Desktop",
+    "longDescription": "Orcaa business management platform.",
+    "publisher": "Orcaa",
+    "copyright": "© 2026 Orcaa",
+    "homepage": "https://orcaa.cloud",
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "frameworks": [],
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  }
+}

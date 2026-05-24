@@ -1,0 +1,107 @@
+name: Build & Release Desktop
+
+# Triggers a build + GitHub release whenever you push a tag like v1.0.1.
+# Manual runs are also available from the Actions tab (workflow_dispatch).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which app to build"
+        required: true
+        default: "business"
+        type: choice
+        options:
+          - business
+          - admin
+
+jobs:
+  build:
+    name: Build ${{ inputs.app || 'business' }} on Windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write # required to create the GitHub release
+
+    env:
+      APP: ${{ inputs.app || 'business' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate icons
+        run: pnpm tauri icon source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
+
+      - name: Resolve version from config
+        id: meta
+        shell: pwsh
+        run: |
+          $conf = Get-Content "src-tauri/tauri.${{ env.APP }}.conf.json" | ConvertFrom-Json
+          $version = $conf.version
+          $tag = if ($env:GITHUB_REF_NAME -like "v*") { $env:GITHUB_REF_NAME } else { "v$version" }
+          $product = $conf.productName
+          echo "version=$version"     >> $env:GITHUB_OUTPUT
+          echo "tag=$tag"             >> $env:GITHUB_OUTPUT
+          echo "product=$product"     >> $env:GITHUB_OUTPUT
+
+      - name: Build + sign + release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: "${{ steps.meta.outputs.product }} ${{ steps.meta.outputs.tag }}"
+          releaseBody: |
+            Auto-generated release built from `${{ github.sha }}`.
+
+            Installers:
+            - **`orcaa-desktop.exe`** — standard installer for end users (NSIS, ~7 MB)
+            - **`Orcaa_*_x64_en-US.msi`** — Windows Installer for IT-managed installs
+            - **`*.nsis.zip` + `*.sig` + `latest.json`** — used by the in-app auto-updater (don't delete)
+          releaseDraft: false
+          prerelease: false
+          args: --config src-tauri/tauri.${{ env.APP }}.conf.json
+
+      - name: Rename setup.exe to orcaa-desktop.exe (stable landing-page URL)
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*_x64-setup.exe" | Select-Object -First 1
+          if (-not $setupExe) { Write-Host "No setup.exe found, skipping rename"; exit 0 }
+
+          # Use the GitHub CLI (preinstalled on the runner) to upload the renamed copy as an additional asset
+          $stableName = "orcaa-desktop.exe"
+          $tempPath = Join-Path $env:RUNNER_TEMP $stableName
+          Copy-Item $setupExe.FullName $tempPath -Force
+          gh release upload $tag $tempPath --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
