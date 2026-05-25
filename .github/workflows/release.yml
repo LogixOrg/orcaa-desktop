@@ -1,11 +1,14 @@
 name: Build & Release Desktop
 
-# Triggers a build + GitHub release whenever you push a tag like v1.0.1.
-# Manual runs are also available from the Actions tab (workflow_dispatch).
+# Triggers:
+# - Push tag "v1.0.0"           -> builds business, release tagged "v1.0.0"
+# - Push tag "admin-v1.0.0"     -> builds admin,    release tagged "admin-v1.0.0"
+# - Manual dispatch (Actions UI) -> pick business or admin
 on:
   push:
     tags:
       - "v*.*.*"
+      - "admin-v*.*.*"
   workflow_dispatch:
     inputs:
       app:
@@ -18,15 +21,35 @@ on:
           - admin
 
 jobs:
+  resolve:
+    name: Resolve app from trigger
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.pick.outputs.app }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.app }}" ]]; then
+            APP="${{ inputs.app }}"
+          elif [[ "${{ github.ref_name }}" == admin-* ]]; then
+            APP="admin"
+          else
+            APP="business"
+          fi
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "Resolved APP=$APP (ref=${{ github.ref_name }})"
+
   build:
-    name: Build ${{ inputs.app || 'business' }} on Windows
+    needs: resolve
+    name: Build ${{ needs.resolve.outputs.app }} on Windows
     runs-on: windows-latest
     timeout-minutes: 40
     permissions:
-      contents: write # required to create the GitHub release
+      contents: write
 
     env:
-      APP: ${{ inputs.app || 'business' }}
+      APP: ${{ needs.resolve.outputs.app }}
 
     steps:
       - name: Checkout
@@ -34,7 +57,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        # pnpm version is read from package.json "packageManager" field
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -58,17 +80,34 @@ jobs:
       - name: Generate icons
         run: pnpm tauri icon src-tauri/source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
 
-      - name: Resolve version from config
+      - name: Resolve version + tag + stable filename
         id: meta
         shell: pwsh
         run: |
           $conf = Get-Content "src-tauri/tauri.${{ env.APP }}.conf.json" | ConvertFrom-Json
           $version = $conf.version
-          $tag = if ($env:GITHUB_REF_NAME -like "v*") { $env:GITHUB_REF_NAME } else { "v$version" }
           $product = $conf.productName
-          echo "version=$version"     >> $env:GITHUB_OUTPUT
-          echo "tag=$tag"             >> $env:GITHUB_OUTPUT
-          echo "product=$product"     >> $env:GITHUB_OUTPUT
+
+          # Tag = the pushed ref if it looks like a tag, else derive from config
+          if ($env:GITHUB_REF_NAME -match '^(admin-)?v\d') {
+            $tag = $env:GITHUB_REF_NAME
+          } elseif ($env:APP -eq "admin") {
+            $tag = "admin-v$version"
+          } else {
+            $tag = "v$version"
+          }
+
+          # Stable filename for the landing-page link / direct download
+          $stableExe = if ($env:APP -eq "admin") { "orcaa-admin.exe" } else { "orcaa-desktop.exe" }
+
+          # Separate updater manifests per app so business and admin don't collide
+          $manifestName = if ($env:APP -eq "admin") { "latest-admin.json" } else { "latest.json" }
+
+          echo "version=$version"          >> $env:GITHUB_OUTPUT
+          echo "tag=$tag"                  >> $env:GITHUB_OUTPUT
+          echo "product=$product"          >> $env:GITHUB_OUTPUT
+          echo "stable_exe=$stableExe"     >> $env:GITHUB_OUTPUT
+          echo "manifest_name=$manifestName" >> $env:GITHUB_OUTPUT
 
       - name: Build + sign + release
         uses: tauri-apps/tauri-action@v0
@@ -83,24 +122,54 @@ jobs:
             Auto-generated release built from `${{ github.sha }}`.
 
             Installers:
-            - **`orcaa-desktop.exe`** — standard installer for end users (NSIS, ~7 MB)
-            - **`Orcaa_*_x64_en-US.msi`** — Windows Installer for IT-managed installs
-            - **`*.nsis.zip` + `*.sig` + `latest.json`** — used by the in-app auto-updater (don't delete)
+            - **`${{ steps.meta.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
+            - `*_x64-setup.exe` — same NSIS installer, versioned filename
+            - `*_x64_en-US.msi` — Windows Installer for IT-managed installs
+            - `*.nsis.zip` + `*.sig` + `${{ steps.meta.outputs.manifest_name }}` — used by the in-app auto-updater (don't delete)
           releaseDraft: false
-          prerelease: false
+          # Admin releases are marked prerelease so GitHub's /releases/latest/ always
+          # resolves to a business release (keeps the landing-page download stable).
+          prerelease: ${{ env.APP == 'admin' }}
           args: --config src-tauri/tauri.${{ env.APP }}.conf.json
 
-      - name: Rename setup.exe to orcaa-desktop.exe (stable landing-page URL)
+      - name: Upload stable-name installer + rename manifest
         shell: pwsh
         run: |
           $tag = "${{ steps.meta.outputs.tag }}"
-          $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*_x64-setup.exe" | Select-Object -First 1
-          if (-not $setupExe) { Write-Host "No setup.exe found, skipping rename"; exit 0 }
+          $stableExe = "${{ steps.meta.outputs.stable_exe }}"
+          $manifestName = "${{ steps.meta.outputs.manifest_name }}"
 
-          # Use the GitHub CLI (preinstalled on the runner) to upload the renamed copy as an additional asset
-          $stableName = "orcaa-desktop.exe"
-          $tempPath = Join-Path $env:RUNNER_TEMP $stableName
-          Copy-Item $setupExe.FullName $tempPath -Force
-          gh release upload $tag $tempPath --clobber
+          # 1. Upload a copy of the NSIS setup under the stable name
+          $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*_x64-setup.exe" | Select-Object -First 1
+          if ($setupExe) {
+            $tempExe = Join-Path $env:RUNNER_TEMP $stableExe
+            Copy-Item $setupExe.FullName $tempExe -Force
+            gh release upload $tag $tempExe --clobber
+            Write-Host "Uploaded $stableExe (copy of $($setupExe.Name))"
+          } else {
+            Write-Host "::warning::No NSIS setup.exe found at expected path"
+          }
+
+          # 2. For admin: rename uploaded latest.json -> latest-admin.json so business + admin
+          #    don't fight over /releases/latest/download/latest.json. Business keeps the
+          #    default 'latest.json' filename.
+          if ($manifestName -ne "latest.json") {
+            $tempDir = Join-Path $env:RUNNER_TEMP "manifest-rename"
+            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+            try {
+              gh release download $tag --pattern "latest.json" --dir $tempDir
+              if (Test-Path (Join-Path $tempDir "latest.json")) {
+                $renamed = Join-Path $tempDir $manifestName
+                Move-Item (Join-Path $tempDir "latest.json") $renamed -Force
+                gh release upload $tag $renamed --clobber
+                gh release delete-asset $tag "latest.json" --yes
+                Write-Host "Renamed latest.json -> $manifestName"
+              } else {
+                Write-Host "::warning::No latest.json found in release to rename"
+              }
+            } finally {
+              Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+            }
+          }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

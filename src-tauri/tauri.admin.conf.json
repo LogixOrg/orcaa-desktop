@@ -14,8 +14,9 @@
   },
   "plugins": {
     "updater": {
+      "active": false,
       "endpoints": [
-        "https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/latest.json"
+        "https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/latest-admin.json"
       ]
     }
   }
