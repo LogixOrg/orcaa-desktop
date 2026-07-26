@@ -14,9 +14,11 @@ The wrapper loads the live hosted PWA — no SPA bundling. App updates ship via 
 
 | Platform | Status | Installer formats |
 |----------|--------|-------------------|
-| Windows  | ✅ Wired + CI release flow | `.msi`, `.exe` (NSIS) |
-| macOS    | ✅ Configs wired; needs a Mac to build | `.dmg`, `.app` |
-| Linux    | ⚪ Same source builds; not configured per-app | `.deb`, `.AppImage` |
+| Windows  | ✅ CI release flow (`windows-latest`) | `.msi`, `.exe` (NSIS) |
+| macOS    | ✅ CI release flow (`macos-latest`, universal Intel + Apple Silicon) — no Mac hardware needed | `.dmg` |
+| Linux    | ✅ CI release flow (`ubuntu-22.04`, x86_64) | `.deb`, `.rpm`, `.AppImage` |
+
+All three build from the same tag push — one workflow, three matrix jobs, one GitHub release.
 
 ---
 
@@ -170,12 +172,13 @@ git push origin master --tags
 ```
 
 The workflow then:
-1. Spins up `windows-latest`, installs Rust + Node + pnpm, restores caches
+1. Spins up `windows-latest`, `macos-latest` and `ubuntu-22.04` (serialized matrix), installs Rust + Node + pnpm, restores caches
 2. Generates icons from `source-icons/business.png`
-3. Runs `tauri build --config src-tauri/tauri.business.conf.json`
-4. Creates a GitHub release tagged `v1.0.1`
-5. Uploads the `.exe`, `.msi`, `.nsis.zip`, `.sig`, and `latest.json`
-6. Renames the NSIS installer to `orcaa-desktop.exe` so the landing-site link stays stable
+3. Runs `tauri build` per platform (macOS builds `--target universal-apple-darwin` — one binary for Intel + Apple Silicon)
+4. Creates ONE GitHub release tagged `v1.0.1` that all three jobs upload into
+5. Uploads `.exe` + `.msi` (Windows), `.dmg` + `.app.tar.gz` (macOS), `.deb` + `.rpm` + `.AppImage` (Linux) with their updater `.sig` files
+6. Uploads stable-name copies for the landing site: `orcaa-desktop.exe`, `orcaa-desktop.dmg`, `orcaa-desktop.AppImage`
+7. A final `manifest` job reads every `*.sig` on the release and composes ONE `latest.json` covering `windows-x86_64`, `darwin-aarch64`, `darwin-x86_64` and `linux-x86_64` — the auto-updater on every OS polls this single file
 
 Build time: ~5–10 min with caches, ~15–20 min cold. GitHub Actions is free for public repos and gives 2,000 Linux-minute equivalents/month for private (Windows costs 2×).
 
@@ -191,34 +194,40 @@ The default workflow builds the **business** app. For admin: trigger via "Run wo
 
 ## macOS-specific notes
 
-### Signing (deferred)
+**No Mac hardware is needed for releases** — CI builds, signs (Tauri updater key) and uploads the `.dmg` on GitHub's `macos-latest` runner. The sections below only cover Apple's OS-level trust chain and local dev on a Mac.
 
-Unsigned `.app` files trigger Gatekeeper warnings. To remove them:
+### Gatekeeper (current state: unsigned)
 
-1. Join the [Apple Developer Program](https://developer.apple.com) ($99/yr)
-2. Create a "Developer ID Application" cert in Xcode → Settings → Accounts → Manage Certificates
-3. Set `bundle.macOS.signingIdentity` in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json) to the cert's Common Name
-4. For notarization, add env vars before building:
-   ```bash
-   export APPLE_ID="you@example.com"
-   export APPLE_PASSWORD="app-specific-password"
-   export APPLE_TEAM_ID="ABCD123456"
-   pnpm build:business
-   ```
+Until Apple signing is configured, macOS users see *"Orcaa is damaged and can't be opened"* or *"unidentified developer"* on first launch (the quarantine flag on downloaded apps). Two documented user workarounds:
+- Right-click the app in Applications → **Open** → **Open** (once; remembered afterwards), or
+- `xattr -cr /Applications/Orcaa.app`
 
-### Mac publish flow
+The landing page's Mac download should link a short "first launch on macOS" note until notarization ships.
 
-Same key as Windows (Tauri's minisign key is cross-platform):
+### Apple signing + notarization (optional, no Mac needed either)
 
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/orcaa.key"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="your-password"
+The workflow auto-enables signing when these repo secrets exist — zero workflow edits:
 
-pnpm build:business
-./scripts/publish-update.sh business 1.0.1 "Bug fixes."
-```
+| Secret | Value |
+|--------|-------|
+| `APPLE_CERTIFICATE` | Base64 of the "Developer ID Application" `.p12` export (`base64 -i cert.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | Password of the `.p12` export |
+| `APPLE_SIGNING_IDENTITY` | Cert Common Name, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | Apple ID email (enables notarization) |
+| `APPLE_PASSWORD` | App-specific password from appleid.apple.com |
+| `APPLE_TEAM_ID` | 10-char team ID |
 
-Merges the `darwin-*` entry into the same `latest.json` you uploaded from the Windows runner. Requires `jq` (`brew install jq`).
+Prereq: [Apple Developer Program](https://developer.apple.com) ($99/yr). The cert can be created and exported through the developer portal in a browser; no Xcode required. With only the first three secrets you get signing (no Gatekeeper "damaged" error but still an internet-download prompt); all six give full notarization (no prompts at all).
+
+### Local dev / manual publish from a Mac (optional)
+
+`pnpm dev:business` / `pnpm build:business` work on a Mac after the prereqs above. [`scripts/publish-update.sh`](scripts/publish-update.sh) can hand-merge a `darwin-*` entry into `latest.json`, but CI's `manifest` job now does this automatically — the script remains for emergency out-of-band patches only.
+
+## Linux-specific notes
+
+- Built on `ubuntu-22.04` **on purpose** — the runner's glibc/webkit2gtk become the minimum for users (Ubuntu 22.04+, Debian 12+, Fedora 38+ and anything newer). Don't bump the runner casually.
+- `.deb` / `.rpm` install the app; the **`.AppImage` is the only format the auto-updater can self-update** (deb/rpm users re-download or use a repo). `latest.json` carries a `linux-x86_64` entry pointing at the signed AppImage.
+- The tray icon (background mode) uses `libayatana-appindicator3`. On GNOME, users may need the AppIndicator shell extension for the tray to show — standard for all tray apps on GNOME.
 
 ---
 
@@ -268,21 +277,22 @@ Uninstalling via Apps & Features removes the install dir; WebView2 user data + T
 
 Installers ship via **GitHub Releases** at [github.com/LogixOrg/orcaa-desktop/releases](https://github.com/LogixOrg/orcaa-desktop/releases).
 
-The [Orcaa landing site](https://orcaa.cloud) "Download for Windows" CTA links to:
+The [Orcaa landing site](https://orcaa.cloud) download CTAs link to stable filenames that never change across versions:
 
 ```
-https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.exe
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.exe        (Windows)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.dmg        (macOS, universal)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.AppImage   (Linux)
 ```
 
-The GitHub Actions workflow renames the versioned NSIS installer to `orcaa-desktop.exe` on each release, so this URL never changes — bumping versions doesn't break the landing page.
+The GitHub Actions workflow uploads stable-name copies of the versioned installers on each release, so these URLs never change — bumping versions doesn't break the landing page.
 
 ---
 
 ## Follow-ups (not in v1)
 
 - **Code signing (Windows)** — Sectigo OV cert (~$200/yr) or DigiCert EV cert (~$400/yr). Removes SmartScreen warnings.
-- **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Removes Gatekeeper warnings.
-- **macOS GitHub Actions matrix** — add `macos-14` runner (Apple Silicon) and `macos-13` runner (Intel) to the workflow, parallel to `windows-latest`. Same workflow, two more jobs.
+- **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Secrets-only setup, already wired in the workflow (see "Apple signing + notarization" above). Removes Gatekeeper warnings.
 - **Native deep-link auth** (`orcaa://`) — register a custom URL scheme so the auth subdomain can hand control back to a running desktop app after a system-browser SSO. Required if Orcaa moves to social-only login (Google/Microsoft).
 - **Window state persistence** — add `tauri-plugin-window-state` to remember window size + position across sessions.
 - **In-app updater UI** — replace the default Tauri restart prompt with a branded toast/dialog (`plugins.updater.dialog = false` already; just needs JS-side handler).

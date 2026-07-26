@@ -4,6 +4,12 @@ name: Build & Release Desktop
 # - Push tag "v1.0.0"           -> builds business, release tagged "v1.0.0"
 # - Push tag "admin-v1.0.0"     -> builds admin,    release tagged "admin-v1.0.0"
 # - Manual dispatch (Actions UI) -> pick business or admin
+#
+# Each run builds ALL THREE platforms into the same release:
+#   windows-latest -> .msi + .exe (NSIS) + .nsis.zip updater payload
+#   macos-latest   -> .dmg + .app.tar.gz updater payload (universal: Intel + Apple Silicon)
+#   ubuntu-22.04   -> .deb + .rpm + .AppImage (the AppImage doubles as the updater payload)
+# No Mac/Linux hardware required — GitHub's runners do the build, sign and notarize.
 on:
   push:
     tags:
@@ -22,11 +28,21 @@ on:
 
 jobs:
   resolve:
-    name: Resolve app from trigger
+    name: Resolve app + version from trigger
     runs-on: ubuntu-latest
     outputs:
       app: ${{ steps.pick.outputs.app }}
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      product: ${{ steps.pick.outputs.product }}
+      manifest_name: ${{ steps.pick.outputs.manifest_name }}
+      stable_exe: ${{ steps.pick.outputs.stable_exe }}
+      stable_dmg: ${{ steps.pick.outputs.stable_dmg }}
+      stable_appimage: ${{ steps.pick.outputs.stable_appimage }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - id: pick
         shell: bash
         run: |
@@ -37,16 +53,76 @@ jobs:
           else
             APP="business"
           fi
-          echo "app=$APP" >> "$GITHUB_OUTPUT"
-          echo "Resolved APP=$APP (ref=${{ github.ref_name }})"
+
+          CONF="src-tauri/tauri.${APP}.conf.json"
+          VERSION=$(jq -r '.version'     "$CONF")
+          PRODUCT=$(jq -r '.productName' "$CONF")
+
+          # Tag = the pushed ref if it looks like a tag, else derive from config
+          if [[ "$GITHUB_REF_NAME" =~ ^(admin-)?v[0-9] ]]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [[ "$APP" == "admin" ]]; then
+            TAG="admin-v$VERSION"
+          else
+            TAG="v$VERSION"
+          fi
+
+          # Separate updater manifests per app so business and admin don't collide,
+          # plus stable installer filenames for the landing-page download links.
+          if [[ "$APP" == "admin" ]]; then
+            MANIFEST="latest-admin.json"
+            STABLE_EXE="orcaa-admin.exe"; STABLE_DMG="orcaa-admin.dmg"; STABLE_APPIMAGE="orcaa-admin.AppImage"
+          else
+            MANIFEST="latest.json"
+            STABLE_EXE="orcaa-desktop.exe"; STABLE_DMG="orcaa-desktop.dmg"; STABLE_APPIMAGE="orcaa-desktop.AppImage"
+          fi
+
+          {
+            echo "app=$APP"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "product=$PRODUCT"
+            echo "manifest_name=$MANIFEST"
+            echo "stable_exe=$STABLE_EXE"
+            echo "stable_dmg=$STABLE_DMG"
+            echo "stable_appimage=$STABLE_APPIMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved APP=$APP VERSION=$VERSION TAG=$TAG (ref=$GITHUB_REF_NAME)"
 
   build:
     needs: resolve
-    name: Build ${{ needs.resolve.outputs.app }} on Windows
-    runs-on: windows-latest
-    timeout-minutes: 40
+    name: Build ${{ needs.resolve.outputs.app }} (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: write
+
+    strategy:
+      fail-fast: false
+      # Serialized: both jobs write to the same GitHub release, and the macOS runner
+      # is billed 10x on private repos — no reason to race them.
+      max-parallel: 1
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            rust_targets: x86_64-pc-windows-msvc
+            build_args: "--bundles msi,nsis"
+            bundle_dir: src-tauri/target/release/bundle
+          - os: macos-latest
+            label: macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build_args: "--target universal-apple-darwin --bundles app,dmg"
+            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
+          # Pinned to 22.04 on purpose: glibc/webkit2gtk on the runner become the FLOOR for
+          # every user's distro. Building on ubuntu-latest (24.04) would break Ubuntu 22.04 /
+          # Debian 12 users. Bump only when those distros are no longer worth supporting.
+          - os: ubuntu-22.04
+            label: linux-x64
+            rust_targets: x86_64-unknown-linux-gnu
+            build_args: "--bundles deb,rpm,appimage"
+            bundle_dir: src-tauri/target/release/bundle
 
     env:
       APP: ${{ needs.resolve.outputs.app }}
@@ -54,6 +130,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # webkit2gtk = the Linux WebView (WebView2 / WKWebView equivalent);
+      # ayatana-appindicator = the tray icon the background mode depends on.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            file
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -67,7 +158,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.rust_targets }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
@@ -80,34 +171,49 @@ jobs:
       - name: Generate icons
         run: pnpm tauri icon src-tauri/source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
 
-      - name: Resolve version + tag + stable filename
-        id: meta
-        shell: pwsh
+      # Apple code signing + notarization is OPTIONAL. With no Apple secrets configured the
+      # macOS build still succeeds and ships an unsigned .dmg (users get a Gatekeeper prompt —
+      # see README "macOS Gatekeeper"). Add the secrets and this step turns signing on with
+      # zero workflow changes.
+      - name: Enable Apple signing (only if secrets are configured)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          $conf = Get-Content "src-tauri/tauri.${{ env.APP }}.conf.json" | ConvertFrom-Json
-          $version = $conf.version
-          $product = $conf.productName
-
-          # Tag = the pushed ref if it looks like a tag, else derive from config
-          if ($env:GITHUB_REF_NAME -match '^(admin-)?v\d') {
-            $tag = $env:GITHUB_REF_NAME
-          } elseif ($env:APP -eq "admin") {
-            $tag = "admin-v$version"
-          } else {
-            $tag = "v$version"
+          forward() {
+            local name="$1" value="$2"
+            [[ -z "$value" ]] && return 0
+            {
+              echo "${name}<<__ORCAA_EOF__"
+              echo "$value"
+              echo "__ORCAA_EOF__"
+            } >> "$GITHUB_ENV"
           }
 
-          # Stable filename for the landing-page link / direct download
-          $stableExe = if ($env:APP -eq "admin") { "orcaa-admin.exe" } else { "orcaa-desktop.exe" }
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "::notice::No APPLE_CERTIFICATE secret — building an UNSIGNED macOS bundle."
+            exit 0
+          fi
 
-          # Separate updater manifests per app so business and admin don't collide
-          $manifestName = if ($env:APP -eq "admin") { "latest-admin.json" } else { "latest.json" }
+          forward APPLE_CERTIFICATE          "$APPLE_CERTIFICATE"
+          forward APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+          forward APPLE_SIGNING_IDENTITY     "$APPLE_SIGNING_IDENTITY"
+          echo "Apple code signing enabled."
 
-          echo "version=$version"          >> $env:GITHUB_OUTPUT
-          echo "tag=$tag"                  >> $env:GITHUB_OUTPUT
-          echo "product=$product"          >> $env:GITHUB_OUTPUT
-          echo "stable_exe=$stableExe"     >> $env:GITHUB_OUTPUT
-          echo "manifest_name=$manifestName" >> $env:GITHUB_OUTPUT
+          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+            forward APPLE_ID       "$APPLE_ID"
+            forward APPLE_PASSWORD "$APPLE_PASSWORD"
+            forward APPLE_TEAM_ID  "$APPLE_TEAM_ID"
+            echo "Notarization enabled."
+          else
+            echo "::warning::Signing without notarization (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing)."
+          fi
 
       - name: Build + sign + release
         uses: tauri-apps/tauri-action@v0
@@ -116,60 +222,164 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ steps.meta.outputs.tag }}
-          releaseName: "${{ steps.meta.outputs.product }} ${{ steps.meta.outputs.tag }}"
+          tagName: ${{ needs.resolve.outputs.tag }}
+          releaseName: "${{ needs.resolve.outputs.product }} ${{ needs.resolve.outputs.tag }}"
           releaseBody: |
             Auto-generated release built from `${{ github.sha }}`.
 
-            Installers:
-            - **`${{ steps.meta.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
+            **Windows**
+            - **`${{ needs.resolve.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
             - `*_x64-setup.exe` — same NSIS installer, versioned filename
             - `*_x64_en-US.msi` — Windows Installer for IT-managed installs
-            - `*.nsis.zip` + `*.sig` + `${{ steps.meta.outputs.manifest_name }}` — used by the in-app auto-updater (don't delete)
+
+            **macOS** (universal — Intel + Apple Silicon, macOS 10.15+)
+            - **`${{ needs.resolve.outputs.stable_dmg }}`** — stable filename used by the landing site / direct download
+            - `*_universal.dmg` — same disk image, versioned filename
+
+            **Linux** (x86_64, glibc 2.35+ / Ubuntu 22.04+)
+            - **`${{ needs.resolve.outputs.stable_appimage }}`** — stable filename used by the landing site / direct download (`chmod +x` and run)
+            - `*_amd64.deb` — Debian / Ubuntu
+            - `*.x86_64.rpm` — Fedora / RHEL / openSUSE
+
+            **Auto-updater** — `*.nsis.zip`, `*.app.tar.gz`, `*.AppImage`, their `*.sig` files and `${{ needs.resolve.outputs.manifest_name }}` (don't delete).
           releaseDraft: false
           # Admin releases are marked prerelease so GitHub's /releases/latest/ always
           # resolves to a business release (keeps the landing-page download stable).
           prerelease: ${{ env.APP == 'admin' }}
-          args: --config src-tauri/tauri.${{ env.APP }}.conf.json
+          # The updater manifest is composed once, for both platforms, in the `manifest`
+          # job below — letting each runner write its own latest.json would have the
+          # second one clobber the first one's platform entry.
+          includeUpdaterJson: false
+          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ matrix.build_args }}
 
-      - name: Upload stable-name installer + rename manifest
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.meta.outputs.tag }}"
-          $stableExe = "${{ steps.meta.outputs.stable_exe }}"
-          $manifestName = "${{ steps.meta.outputs.manifest_name }}"
-
-          # 1. Upload a copy of the NSIS setup under the stable name
-          $setupExe = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*_x64-setup.exe" | Select-Object -First 1
-          if ($setupExe) {
-            $tempExe = Join-Path $env:RUNNER_TEMP $stableExe
-            Copy-Item $setupExe.FullName $tempExe -Force
-            gh release upload $tag $tempExe --clobber
-            Write-Host "Uploaded $stableExe (copy of $($setupExe.Name))"
-          } else {
-            Write-Host "::warning::No NSIS setup.exe found at expected path"
-          }
-
-          # 2. For admin: rename uploaded latest.json -> latest-admin.json so business + admin
-          #    don't fight over /releases/latest/download/latest.json. Business keeps the
-          #    default 'latest.json' filename.
-          if ($manifestName -ne "latest.json") {
-            $tempDir = Join-Path $env:RUNNER_TEMP "manifest-rename"
-            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-            try {
-              gh release download $tag --pattern "latest.json" --dir $tempDir
-              if (Test-Path (Join-Path $tempDir "latest.json")) {
-                $renamed = Join-Path $tempDir $manifestName
-                Move-Item (Join-Path $tempDir "latest.json") $renamed -Force
-                gh release upload $tag $renamed --clobber
-                gh release delete-asset $tag "latest.json" --yes
-                Write-Host "Renamed latest.json -> $manifestName"
-              } else {
-                Write-Host "::warning::No latest.json found in release to rename"
-              }
-            } finally {
-              Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-            }
-          }
+      - name: Upload stable-name Windows installer
+        if: runner.os == 'Windows'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SETUP=$(find "${{ matrix.bundle_dir }}/nsis" -maxdepth 1 -name "*_x64-setup.exe" | head -1)
+          if [[ -z "$SETUP" ]]; then
+            echo "::warning::No NSIS setup.exe found at expected path"; exit 0
+          fi
+          cp "$SETUP" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_exe }}"
+          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_exe }}" --clobber
+          echo "Uploaded ${{ needs.resolve.outputs.stable_exe }} (copy of $(basename "$SETUP"))"
+
+      - name: Upload stable-name macOS disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DMG=$(find "${{ matrix.bundle_dir }}/dmg" -maxdepth 1 -name "*.dmg" | head -1)
+          if [[ -z "$DMG" ]]; then
+            echo "::warning::No .dmg found at expected path"; exit 0
+          fi
+          cp "$DMG" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_dmg }}"
+          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_dmg }}" --clobber
+          echo "Uploaded ${{ needs.resolve.outputs.stable_dmg }} (copy of $(basename "$DMG"))"
+
+      - name: Upload stable-name Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMG=$(find "${{ matrix.bundle_dir }}/appimage" -maxdepth 1 -name "*.AppImage" | head -1)
+          if [[ -z "$IMG" ]]; then
+            echo "::warning::No .AppImage found at expected path"; exit 0
+          fi
+          cp "$IMG" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_appimage }}"
+          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_appimage }}" --clobber
+          echo "Uploaded ${{ needs.resolve.outputs.stable_appimage }} (copy of $(basename "$IMG"))"
+
+  manifest:
+    needs: [resolve, build]
+    name: Compose updater manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      MANIFEST: ${{ needs.resolve.outputs.manifest_name }}
+    steps:
+      # Built from the release's own *.sig assets rather than per-runner, so the Windows
+      # and macOS entries always land in ONE manifest regardless of job order/failure.
+      - name: Build latest.json from release signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "Release assets:"; echo "$ASSETS"
+
+          PLATFORMS="{}"
+          add_platform() {
+            local key="$1" sig="$2" url="$3"
+            PLATFORMS=$(jq -n --argjson p "$PLATFORMS" --arg k "$key" --arg s "$sig" --arg u "$url" \
+              '$p + {($k): {signature: $s, url: $u}}')
+          }
+
+          fetch_sig() {
+            local name="$1"
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern "$name" --dir sigs >/dev/null
+            tr -d '[:space:]' < "sigs/$name"
+          }
+
+          asset_url() {
+            printf 'https://github.com/%s/releases/download/%s/%s' \
+              "$GITHUB_REPOSITORY" "$TAG" "$(jq -rn --arg n "$1" '$n|@uri')"
+          }
+
+          WIN_NSIS=""; WIN_MSI=""
+          while IFS= read -r sig_name; do
+            [[ -z "$sig_name" ]] && continue
+            payload="${sig_name%.sig}"
+            signature=$(fetch_sig "$sig_name")
+            url=$(asset_url "$payload")
+
+            case "$payload" in
+              # createUpdaterArtifacts:true signs the installer itself; *.zip covers v1Compatible.
+              *-setup.exe|*.nsis.zip)
+                WIN_NSIS="$signature|$url" ;;
+              *.msi|*.msi.zip)
+                WIN_MSI="$signature|$url" ;;
+              *.app.tar.gz)
+                # Universal binary — the updater looks up an exact `darwin-<arch>` key,
+                # so both architectures point at the same artifact.
+                add_platform "darwin-aarch64" "$signature" "$url"
+                add_platform "darwin-x86_64"  "$signature" "$url" ;;
+              *.AppImage|*.AppImage.tar.gz)
+                # AppImage is the only self-updating Linux format (.deb/.rpm update via the distro).
+                add_platform "linux-x86_64" "$signature" "$url" ;;
+              *)
+                echo "::notice::Ignoring unrecognized signed asset $payload" ;;
+            esac
+          done <<< "$(echo "$ASSETS" | grep '\.sig$' || true)"
+
+          # Existing installs are NSIS (landing-page exe), so prefer the NSIS payload;
+          # MSI is only the fallback if NSIS ever disappears from the release.
+          WIN="${WIN_NSIS:-$WIN_MSI}"
+          if [[ -n "$WIN" ]]; then
+            add_platform "windows-x86_64" "${WIN%%|*}" "${WIN#*|}"
+          fi
+
+          COUNT=$(jq 'length' <<< "$PLATFORMS")
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "::error::No updater payloads found on release $TAG. Is bundle.createUpdaterArtifacts enabled and TAURI_SIGNING_PRIVATE_KEY set?"
+            exit 1
+          fi
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "Improvements and fixes." \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > "$MANIFEST"
+
+          echo "$MANIFEST:"; cat "$MANIFEST"
+          gh release upload "$TAG" "$MANIFEST" -R "$GITHUB_REPOSITORY" --clobber
