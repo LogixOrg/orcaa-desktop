@@ -183,6 +183,10 @@ jobs:
             patchelf \
             file
 
+      # Reads the pnpm version from `packageManager` in package.json — no
+      # `version:` input here on purpose, so there is one source of truth.
+      # Deleting that field (or the lockfile `pnpm install --frozen-lockfile`
+      # needs two steps down) fails the build before a single crate compiles.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
