@@ -60,10 +60,82 @@ Closing the window (`X` button) **does NOT quit the app** — it minimizes to th
 | Click `X` (close window) | Window hides; tray icon stays; WebSocket stays connected |
 | Left-click tray icon | Re-opens / focuses the window |
 | Right-click tray icon → "Open Orcaa" | Same as above |
-| Right-click tray icon → "Quit" | Truly exits |
+| Right-click tray icon → "Check for Updates…" | Manual update check, always reports back (found / up to date / failed) |
+| Right-click tray icon → "Quit" | Persists session, then truly exits |
 | Launching the app a second time while one is already running | Focuses the existing window (single-instance via `tauri-plugin-single-instance`) |
 
+The **first** time the window is closed, a one-off native toast explains that the app is still running in the tray — hiding on X is the right default, but it is surprising once. The flag lives in the store, so it never fires twice.
+
 Memory cost: ~150–200 MB (WebView2 + Rust shell). Negligible CPU when idle.
+
+---
+
+## Sign-in happens in the browser, not in the app
+
+The webview never renders a login page. Google returns `disallowed_useragent` for OAuth inside embedded
+webviews, password managers can't reach into WebView2, and an app that draws its own login box is asking
+people to type credentials into a window they can't verify. So the shell hands sign-in to the real browser
+and waits for the result on an `orcaa://` deep link.
+
+```
+  shell                         system browser                 backend
+    │  verifier (never leaves)
+    │  challenge = sha256 ──────►  auth.orcaa.cloud?desktop=1
+    │                               │  password / Google / 2FA
+    │                               ├──── POST /auth/desktop-handoff ────►
+    │                               ◄──── single-use ticket ─────────────┤
+    ◄─── orcaa://auth?token=…&state=…┘
+    │
+    └─ webview → <tenant>/desktop-handoff?token=…&verifier=…  ── exchange ──►
+                                                             ◄── JWTs ──────┘
+```
+
+**Any locally-installed program can register `orcaa://`**, so the deep link is assumed readable by an
+attacker. Two independent things defend it:
+
+- **PKCE.** The shell keeps a random `verifier` and sends only its SHA-256 through the browser. The backend
+  refuses to redeem a ticket without the verifier, so a captured link is inert.
+- **`state` matching.** A deep link the shell didn't initiate is dropped, so nothing can push an
+  attacker-chosen session into the window. The pending attempt is consumed on first use, so links can't
+  be replayed.
+
+The returned `subdomain` is validated as a single DNS label before it is used to build a URL — otherwise a
+crafted value could steer the webview off the tenant domain.
+
+Where the parts live:
+
+| Piece | Location |
+|-------|----------|
+| State/verifier, callback validation, unit tests | [`src-tauri/src/signin.rs`](src-tauri/src/signin.rs) |
+| Scheme registration | `plugins.deep-link.desktop.schemes` in `tauri.conf.json` |
+| Ticket issue + redeem | `DesktopHandoffService` / `DesktopHandoffController` (backend) |
+| Browser-side hand-back | `apps/auth/src/utils/desktopHandoff.ts` (orcaa-apps) |
+| In-app landing | `apps/business/src/app/auth/desktop-handoff/page.tsx` (orcaa-apps) |
+
+**Windows/Linux note:** an `orcaa://` link launches a *new* process with the URL in argv rather than
+signalling the running one. `tauri-plugin-single-instance` is therefore built with its `deep-link` feature
+so the argument is forwarded into the live instance — without that feature the link silently opens a second
+window instead of resuming sign-in.
+
+The **admin** desktop build is unchanged: it points at `admin.orcaa.cloud`, whose two-step email-code login
+never goes through the auth app, so there is nothing to hand off.
+
+---
+
+## What the Rust shell actually does
+
+Everything below lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs). Keyboard shortcuts are deliberately **not** implemented — WebView2 ships browser accelerator keys enabled by default, so <kbd>Ctrl</kbd>+<kbd>R</kbd> (reload), <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> (print), <kbd>Ctrl</kbd>+<kbd>F</kbd> and <kbd>Ctrl</kbd>+<kbd>±</kbd>/<kbd>0</kbd> (zoom) already work. A menu bar duplicating them would be clutter.
+
+| Concern | Behaviour |
+|---------|-----------|
+| **First paint** | The window is created hidden and revealed on the first `PageLoadEvent::Finished`, so users never see WebView2's blank white canvas while the PWA boots. A 12 s timeout reveals it anyway — a dead network must not leave a tray icon and no window. |
+| **Reveal guard** | `on_page_load` fires on *every* navigation, so the reveal is behind an `AtomicBool`. Without it an in-app route change would yank the window back out of the tray. |
+| **Window geometry** | Size / position / maximized / fullscreen restore across launches (`tauri-plugin-window-state`). Visibility is deliberately excluded from the flags — restoring "hidden" would make a launch appear to do nothing. |
+| **Small screens** | On reveal the window is clamped to the monitor's *work area* and re-centred if it had to shrink. Catches both the 1440×900 default on a 1366×768 panel and geometry restored from a larger external display. |
+| **Session continuity** | The current URL + geometry are saved on every exit path — close button, tray Quit, and the updater's pre-exit hook. |
+| **External links** | Any navigation off `*.orcaa.cloud` / `*.orcaa.test` is handed to the system browser instead of loading in-app. |
+| **Native strings** | Tray, update toasts and the tray hint are localized EN/AR from the OS display language ([`src-tauri/src/i18n.rs`](src-tauri/src/i18n.rs)). The tray is drawn before any page loads, so the webview's locale isn't available yet — the OS is the only signal that early. |
+| **Diagnostics** | Startup, update checks and failures are logged to the OS log dir via `tauri-plugin-log`. |
 
 ---
 
@@ -179,15 +251,35 @@ Note: paste the **contents**, not the path. tauri-action expects the key as a st
 
 ### Cutting a release
 
+> **The tag does not set the version.** The workflow reads it from the app config
+> (`VERSION=$(jq -r '.version' "$CONF")`) and writes that into both the artifact
+> filenames and `latest.json`. Tag `v1.0.2` on a config that still says `1.0.0`
+> produces a release whose manifest advertises **1.0.0** — every installed client
+> compares `1.0.0 > 1.0.0`, decides it is current, and never updates. This
+> silently stalled updates for the whole 1.0.x line. Bump the config, always.
+
+Keep all five in lockstep — both apps share one Rust crate, so they version together:
+
 ```bash
-# 1. Bump version in the per-app config
-# Edit src-tauri/tauri.business.conf.json → "version": "1.0.1"
+# 1. Bump every version field to the SAME number
+#    src-tauri/tauri.conf.json          → "version": "1.0.3"
+#    src-tauri/tauri.business.conf.json → "version": "1.0.3"
+#    src-tauri/tauri.admin.conf.json    → "version": "1.0.3"
+#    src-tauri/Cargo.toml               → version = "1.0.3"
+#    package.json                       → "version": "1.0.3"
 
 # 2. Commit + tag + push
-git add src-tauri/tauri.business.conf.json
-git commit -m "chore: bump business to 1.0.1"
-git tag v1.0.1
+git add -A
+git commit -m "chore: bump to 1.0.3"
+git tag v1.0.3
 git push origin master --tags
+```
+
+Sanity-check the release afterwards — this catches the mismatch above in one call:
+
+```bash
+curl -sL https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/latest.json | jq .version
+# must equal the version you just tagged
 ```
 
 The workflow then:
@@ -275,7 +367,15 @@ Set in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json):
 ]
 ```
 
-GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent release's assets. The updater polls this on app launch, downloads the `.nsis.zip`, verifies signature against the pubkey, and prompts restart if a newer version exists.
+GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent release's assets. Admin releases are marked `prerelease`, so `/latest/` always resolves to a business release.
+
+**Registering the plugin is not enough — Tauri 2 never checks on its own.** The check is driven from [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs):
+
+- **On launch**, 20 s after startup (window painted, WebSocket up), a silent check runs. If an update exists the user gets a localized "Update available" toast, it downloads in the background, and the installer takes over.
+- **On demand**, via the tray's **Check for Updates…**, which also reports "you're up to date" / "couldn't check" so the click is never a no-op.
+- **Before exit**, an `on_before_exit` hook persists the current URL and window geometry. This matters on Windows: `install()` hands off to the NSIS installer and calls `process::exit(0)` itself, so no window event ever fires and unsaved state would be lost.
+
+Windows uses NSIS `passive` mode (`/P /R`) — a progress bar, then the installer relaunches the app. macOS and Linux swap the bundle in place and are restarted explicitly via `app.restart()`.
 
 ---
 
@@ -284,7 +384,9 @@ GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent 
 | Data | Location (Windows) |
 |------|-------------------|
 | Cookies, localStorage, IndexedDB, service worker cache (the PWA itself) | `%LOCALAPPDATA%\<identifier>\EBWebView\` (WebView2 user data) |
-| Last URL, future user prefs | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin) |
+| Last URL, tray-hint-seen flag | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin) |
+| Window size / position / maximized | `%APPDATA%\<identifier>\.window-state.json` (window-state plugin) |
+| Shell logs (startup, update checks, failures) | `%LOCALAPPDATA%\<identifier>\logs\` — ask users for this file when diagnosing |
 | App install (NSIS) | `%LOCALAPPDATA%\Programs\Orcaa\` |
 | App install (MSI per-machine) | `C:\Program Files\Orcaa\` |
 
@@ -313,8 +415,8 @@ The GitHub Actions workflow uploads stable-name copies of the versioned installe
 - **Code signing (Windows)** — Sectigo OV cert (~$200/yr) or DigiCert EV cert (~$400/yr). Removes SmartScreen warnings.
 - **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Secrets-only setup, already wired in the workflow (see "Apple signing + notarization" above). Removes Gatekeeper warnings.
 - **Native deep-link auth** (`orcaa://`) — register a custom URL scheme so the auth subdomain can hand control back to a running desktop app after a system-browser SSO. Required if Orcaa moves to social-only login (Google/Microsoft).
-- **Window state persistence** — add `tauri-plugin-window-state` to remember window size + position across sessions.
-- **In-app updater UI** — replace the default Tauri restart prompt with a branded toast/dialog (`plugins.updater.dialog = false` already; just needs JS-side handler).
+- **Notification click → focus + navigate** — Tauri notifications can carry an `actionTypeId`; wire a handler that raises the window and routes to the relevant page.
+- **Custom user agent** — deliberately *not* set. `user_agent()` replaces the UA string wholesale, and the tenant subdomains sit behind Cloudflare, where a non-standard UA risks bot challenges. The PWA already identifies the shell via `__TAURI_INTERNALS__`; if the backend needs to know, send a header instead.
 - **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push.
 - **Chat / voice-call OS toasts** — currently only the main `.Notification` broadcast fires OS toasts; chat messages and voice calls fire `chat-message` / `voice-call-incoming` custom events. Hook the bridge into those handlers in the PWA's `WebSocketContext.tsx`.
 - **Notification click → focus app + navigate** — Tauri notifications can carry an `actionTypeId`. Wire a click handler that brings the window to front and navigates to the relevant URL.

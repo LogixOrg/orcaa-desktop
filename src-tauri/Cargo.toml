@@ -1,6 +1,6 @@
 [package]
 name = "orcaa-desktop"
-version = "1.0.0"
+version = "1.0.2"
 description = "Orcaa desktop wrapper (Business + Admin)"
 authors = ["Orcaa"]
 edition = "2021"
@@ -18,10 +18,23 @@ tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-store = "2"
-tauri-plugin-single-instance = "2"
+# `deep-link` feature is required on Windows/Linux: the OS launches a NEW
+# process with the orcaa:// URL as a CLI argument instead of signalling the
+# running one. This feature forwards that argument into the existing instance
+# so `on_open_url` fires there, matching macOS behaviour.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+tauri-plugin-window-state = "2"
+sys-locale = "0.3"
+tauri-plugin-log = "2"
+log = "0.4"
+tokio = { version = "1", features = ["time"] }
+tauri-plugin-deep-link = "2"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
 
 [profile.release]
 panic = "abort"
