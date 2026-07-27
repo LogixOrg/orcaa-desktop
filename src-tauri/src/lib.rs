@@ -625,8 +625,6 @@ pub fn run() {
                 check_for_updates(update_handle, update_strings, false).await;
             });
 
-            app.manage(strings);
-
             Ok(())
         })
         .on_window_event(|window, event| {

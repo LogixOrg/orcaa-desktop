@@ -120,6 +120,13 @@ window instead of resuming sign-in.
 The **admin** desktop build is unchanged: it points at `admin.orcaa.cloud`, whose two-step email-code login
 never goes through the auth app, so there is nothing to hand off.
 
+**The `orcaa://` scheme is registered by the business build only** — it lives in
+`tauri.business.conf.json`, not the shared base config. Both builds registering the same scheme would be a
+collision: Windows hands a scheme to whichever installer ran last, so on a machine with both apps installed
+a callback could be delivered to the admin app, which has no pending sign-in and would silently drop it —
+leaving the business app waiting on the holding page forever. If admin ever needs its own deep link, give it
+a distinct scheme rather than sharing this one.
+
 ---
 
 ## What the Rust shell actually does

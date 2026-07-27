@@ -17,6 +17,11 @@
       "endpoints": [
         "https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/latest.json"
       ]
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["orcaa"]
+      }
     }
   }
 }

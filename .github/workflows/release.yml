@@ -1,11 +1,21 @@
 name: Build & Release Desktop
 
 # Triggers:
-# - Push tag "v1.0.0"           -> builds business, release tagged "v1.0.0"
-# - Push tag "admin-v1.0.0"     -> builds admin,    release tagged "admin-v1.0.0"
-# - Manual dispatch (Actions UI) -> pick business or admin
+# - Push tag "v1.0.0"           -> builds BOTH apps (business + admin)
+# - Push tag "admin-v1.0.0"     -> builds admin only
+# - Manual dispatch (Actions UI) -> pick business, admin, or both
 #
-# Each run builds ALL THREE platforms into the same release:
+# Both apps compile from ONE Rust crate, so a shared fix (a capability, a shell
+# change) reaches users only when both are rebuilt. A plain "v*" tag therefore
+# builds both by default — admin used to need its own tag and silently fell
+# years behind on shared fixes.
+#
+# Each app still gets its OWN release: business lands on "v1.0.0", admin on
+# "admin-v1.0.0" marked prerelease. That split is deliberate — GitHub's
+# /releases/latest/ resolves to the newest non-prerelease, which is what keeps
+# the landing page's stable download URLs pointing at business builds.
+#
+# Each app builds ALL THREE platforms:
 #   windows-latest -> .msi + .exe (NSIS) + .nsis.zip updater payload
 #   macos-latest   -> .dmg + .app.tar.gz updater payload (universal: Intel + Apple Silicon)
 #   ubuntu-22.04   -> .deb + .rpm + .AppImage (the AppImage doubles as the updater payload)
@@ -20,25 +30,20 @@ on:
       app:
         description: "Which app to build"
         required: true
-        default: "business"
+        default: "both"
         type: choice
         options:
+          - both
           - business
           - admin
 
 jobs:
   resolve:
-    name: Resolve app + version from trigger
+    name: Resolve apps + version from trigger
     runs-on: ubuntu-latest
     outputs:
-      app: ${{ steps.pick.outputs.app }}
+      apps: ${{ steps.pick.outputs.apps }}
       version: ${{ steps.pick.outputs.version }}
-      tag: ${{ steps.pick.outputs.tag }}
-      product: ${{ steps.pick.outputs.product }}
-      manifest_name: ${{ steps.pick.outputs.manifest_name }}
-      stable_exe: ${{ steps.pick.outputs.stable_exe }}
-      stable_dmg: ${{ steps.pick.outputs.stable_dmg }}
-      stable_appimage: ${{ steps.pick.outputs.stable_appimage }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,65 +51,72 @@ jobs:
       - id: pick
         shell: bash
         run: |
+          set -euo pipefail
+
           if [[ -n "${{ inputs.app }}" ]]; then
-            APP="${{ inputs.app }}"
-          elif [[ "${{ github.ref_name }}" == admin-* ]]; then
-            APP="admin"
+            case "${{ inputs.app }}" in
+              both)  APPS='["business","admin"]' ;;
+              admin) APPS='["admin"]' ;;
+              *)     APPS='["business"]' ;;
+            esac
+          elif [[ "$GITHUB_REF_NAME" == admin-* ]]; then
+            APPS='["admin"]'
           else
-            APP="business"
+            APPS='["business","admin"]'
           fi
 
-          CONF="src-tauri/tauri.${APP}.conf.json"
-          VERSION=$(jq -r '.version'     "$CONF")
-          PRODUCT=$(jq -r '.productName' "$CONF")
+          # The version comes from the config, NOT the tag — it is what lands in
+          # every artifact filename and in latest.json.
+          VERSION=$(jq -r '.version' src-tauri/tauri.business.conf.json)
 
-          # Tag = the pushed ref if it looks like a tag, else derive from config
-          if [[ "$GITHUB_REF_NAME" =~ ^(admin-)?v[0-9] ]]; then
-            TAG="$GITHUB_REF_NAME"
-          elif [[ "$APP" == "admin" ]]; then
-            TAG="admin-v$VERSION"
-          else
-            TAG="v$VERSION"
-          fi
+          # Both apps share one crate and must ship in lockstep, so their configs
+          # must agree. A drifting pair would publish two releases claiming
+          # different versions of identical shell code.
+          for app in business admin; do
+            APP_VERSION=$(jq -r '.version' "src-tauri/tauri.${app}.conf.json")
+            if [[ "$APP_VERSION" != "$VERSION" ]]; then
+              echo "::error::tauri.${app}.conf.json says $APP_VERSION but tauri.business.conf.json says $VERSION. Both apps build from one crate — keep every version field in lockstep."
+              exit 1
+            fi
+          done
 
-          # Separate updater manifests per app so business and admin don't collide,
-          # plus stable installer filenames for the landing-page download links.
-          if [[ "$APP" == "admin" ]]; then
-            MANIFEST="latest-admin.json"
-            STABLE_EXE="orcaa-admin.exe"; STABLE_DMG="orcaa-admin.dmg"; STABLE_APPIMAGE="orcaa-admin.AppImage"
-          else
-            MANIFEST="latest.json"
-            STABLE_EXE="orcaa-desktop.exe"; STABLE_DMG="orcaa-desktop.dmg"; STABLE_APPIMAGE="orcaa-desktop.AppImage"
+          # THE guard. The tag does not set the version; the config does. Tagging
+          # v1.0.5 over a config still reading 1.0.2 publishes a release whose
+          # manifest advertises 1.0.2 — every client compares that against its own
+          # 1.0.2, correctly concludes it is current, and the update never ships.
+          # That silently stalled the entire 1.0.x line. Fail loudly instead.
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#admin-}"
+            TAG_VERSION="${TAG_VERSION#v}"
+            if [[ "$TAG_VERSION" != "$VERSION" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME declares version $TAG_VERSION but the app config says $VERSION. Bump all five version fields (tauri.conf.json, tauri.business.conf.json, tauri.admin.conf.json, Cargo.toml, package.json), then re-tag."
+              exit 1
+            fi
           fi
 
           {
-            echo "app=$APP"
+            echo "apps=$APPS"
             echo "version=$VERSION"
-            echo "tag=$TAG"
-            echo "product=$PRODUCT"
-            echo "manifest_name=$MANIFEST"
-            echo "stable_exe=$STABLE_EXE"
-            echo "stable_dmg=$STABLE_DMG"
-            echo "stable_appimage=$STABLE_APPIMAGE"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Resolved APP=$APP VERSION=$VERSION TAG=$TAG (ref=$GITHUB_REF_NAME)"
+          echo "Resolved APPS=$APPS VERSION=$VERSION (ref=$GITHUB_REF_NAME)"
 
   build:
     needs: resolve
-    name: Build ${{ needs.resolve.outputs.app }} (${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.app }} (${{ matrix.target.label }})
+    runs-on: ${{ matrix.target.os }}
     timeout-minutes: 60
     permissions:
       contents: write
 
     strategy:
       fail-fast: false
-      # Serialized: both jobs write to the same GitHub release, and the macOS runner
-      # is billed 10x on private repos — no reason to race them.
+      # Serialized: jobs write to shared releases, and the macOS runner is billed
+      # 10x on private repos — no reason to race them.
       max-parallel: 1
       matrix:
-        include:
+        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
+        target:
           - os: windows-latest
             label: windows-x64
             rust_targets: x86_64-pc-windows-msvc
@@ -125,11 +137,36 @@ jobs:
             bundle_dir: src-tauri/target/release/bundle
 
     env:
-      APP: ${{ needs.resolve.outputs.app }}
+      APP: ${{ matrix.app }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Per-app naming lives here rather than in `resolve` now that one run can
+      # produce two apps.
+      - id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.resolve.outputs.version }}"
+          PRODUCT=$(jq -r '.productName' "src-tauri/tauri.${APP}.conf.json")
+
+          if [[ "$APP" == "admin" ]]; then
+            TAG="admin-v$VERSION"
+            STABLE_EXE="orcaa-admin.exe"; STABLE_DMG="orcaa-admin.dmg"; STABLE_APPIMAGE="orcaa-admin.AppImage"
+          else
+            TAG="v$VERSION"
+            STABLE_EXE="orcaa-desktop.exe"; STABLE_DMG="orcaa-desktop.dmg"; STABLE_APPIMAGE="orcaa-desktop.AppImage"
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "product=$PRODUCT"
+            echo "stable_exe=$STABLE_EXE"
+            echo "stable_dmg=$STABLE_DMG"
+            echo "stable_appimage=$STABLE_APPIMAGE"
+          } >> "$GITHUB_OUTPUT"
 
       # webkit2gtk = the Linux WebView (WebView2 / WKWebView equivalent);
       # ayatana-appindicator = the tray icon the background mode depends on.
@@ -158,12 +195,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_targets }}
+          targets: ${{ matrix.target.rust_targets }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          key: ${{ matrix.app }}
 
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
@@ -222,35 +260,35 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.resolve.outputs.tag }}
-          releaseName: "${{ needs.resolve.outputs.product }} ${{ needs.resolve.outputs.tag }}"
+          tagName: ${{ steps.app.outputs.tag }}
+          releaseName: "${{ steps.app.outputs.product }} ${{ steps.app.outputs.tag }}"
           releaseBody: |
             Auto-generated release built from `${{ github.sha }}`.
 
             **Windows**
-            - **`${{ needs.resolve.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
+            - **`${{ steps.app.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
             - `*_x64-setup.exe` — same NSIS installer, versioned filename
             - `*_x64_en-US.msi` — Windows Installer for IT-managed installs
 
             **macOS** (universal — Intel + Apple Silicon, macOS 10.15+)
-            - **`${{ needs.resolve.outputs.stable_dmg }}`** — stable filename used by the landing site / direct download
+            - **`${{ steps.app.outputs.stable_dmg }}`** — stable filename used by the landing site / direct download
             - `*_universal.dmg` — same disk image, versioned filename
 
             **Linux** (x86_64, glibc 2.35+ / Ubuntu 22.04+)
-            - **`${{ needs.resolve.outputs.stable_appimage }}`** — stable filename used by the landing site / direct download (`chmod +x` and run)
+            - **`${{ steps.app.outputs.stable_appimage }}`** — stable filename used by the landing site / direct download (`chmod +x` and run)
             - `*_amd64.deb` — Debian / Ubuntu
             - `*.x86_64.rpm` — Fedora / RHEL / openSUSE
 
-            **Auto-updater** — `*.nsis.zip`, `*.app.tar.gz`, `*.AppImage`, their `*.sig` files and `${{ needs.resolve.outputs.manifest_name }}` (don't delete).
+            **Auto-updater** — `*.nsis.zip`, `*.app.tar.gz`, `*.AppImage`, their `*.sig` files and the updater manifest (don't delete).
           releaseDraft: false
           # Admin releases are marked prerelease so GitHub's /releases/latest/ always
           # resolves to a business release (keeps the landing-page download stable).
-          prerelease: ${{ env.APP == 'admin' }}
-          # The updater manifest is composed once, for both platforms, in the `manifest`
-          # job below — letting each runner write its own latest.json would have the
-          # second one clobber the first one's platform entry.
+          prerelease: ${{ matrix.app == 'admin' }}
+          # The updater manifest is composed once per app, in the `manifest` job
+          # below — letting each runner write its own would have the second one
+          # clobber the first one's platform entry.
           includeUpdaterJson: false
-          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ matrix.build_args }}
+          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ matrix.target.build_args }}
 
       - name: Upload stable-name Windows installer
         if: runner.os == 'Windows'
@@ -258,13 +296,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SETUP=$(find "${{ matrix.bundle_dir }}/nsis" -maxdepth 1 -name "*_x64-setup.exe" | head -1)
+          SETUP=$(find "${{ matrix.target.bundle_dir }}/nsis" -maxdepth 1 -name "*_x64-setup.exe" | head -1)
           if [[ -z "$SETUP" ]]; then
             echo "::warning::No NSIS setup.exe found at expected path"; exit 0
           fi
-          cp "$SETUP" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_exe }}"
-          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_exe }}" --clobber
-          echo "Uploaded ${{ needs.resolve.outputs.stable_exe }} (copy of $(basename "$SETUP"))"
+          cp "$SETUP" "$RUNNER_TEMP/${{ steps.app.outputs.stable_exe }}"
+          gh release upload "${{ steps.app.outputs.tag }}" "$RUNNER_TEMP/${{ steps.app.outputs.stable_exe }}" --clobber
+          echo "Uploaded ${{ steps.app.outputs.stable_exe }} (copy of $(basename "$SETUP"))"
 
       - name: Upload stable-name macOS disk image
         if: runner.os == 'macOS'
@@ -272,13 +310,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DMG=$(find "${{ matrix.bundle_dir }}/dmg" -maxdepth 1 -name "*.dmg" | head -1)
+          DMG=$(find "${{ matrix.target.bundle_dir }}/dmg" -maxdepth 1 -name "*.dmg" | head -1)
           if [[ -z "$DMG" ]]; then
             echo "::warning::No .dmg found at expected path"; exit 0
           fi
-          cp "$DMG" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_dmg }}"
-          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_dmg }}" --clobber
-          echo "Uploaded ${{ needs.resolve.outputs.stable_dmg }} (copy of $(basename "$DMG"))"
+          cp "$DMG" "$RUNNER_TEMP/${{ steps.app.outputs.stable_dmg }}"
+          gh release upload "${{ steps.app.outputs.tag }}" "$RUNNER_TEMP/${{ steps.app.outputs.stable_dmg }}" --clobber
+          echo "Uploaded ${{ steps.app.outputs.stable_dmg }} (copy of $(basename "$DMG"))"
 
       - name: Upload stable-name Linux AppImage
         if: runner.os == 'Linux'
@@ -286,35 +324,44 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          IMG=$(find "${{ matrix.bundle_dir }}/appimage" -maxdepth 1 -name "*.AppImage" | head -1)
+          IMG=$(find "${{ matrix.target.bundle_dir }}/appimage" -maxdepth 1 -name "*.AppImage" | head -1)
           if [[ -z "$IMG" ]]; then
             echo "::warning::No .AppImage found at expected path"; exit 0
           fi
-          cp "$IMG" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_appimage }}"
-          gh release upload "${{ needs.resolve.outputs.tag }}" "$RUNNER_TEMP/${{ needs.resolve.outputs.stable_appimage }}" --clobber
-          echo "Uploaded ${{ needs.resolve.outputs.stable_appimage }} (copy of $(basename "$IMG"))"
+          cp "$IMG" "$RUNNER_TEMP/${{ steps.app.outputs.stable_appimage }}"
+          gh release upload "${{ steps.app.outputs.tag }}" "$RUNNER_TEMP/${{ steps.app.outputs.stable_appimage }}" --clobber
+          echo "Uploaded ${{ steps.app.outputs.stable_appimage }} (copy of $(basename "$IMG"))"
 
   manifest:
     needs: [resolve, build]
-    name: Compose updater manifest
+    name: Compose updater manifest (${{ matrix.app }})
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ needs.resolve.outputs.tag }}
       VERSION: ${{ needs.resolve.outputs.version }}
-      MANIFEST: ${{ needs.resolve.outputs.manifest_name }}
     steps:
-      # Built from the release's own *.sig assets rather than per-runner, so the Windows
-      # and macOS entries always land in ONE manifest regardless of job order/failure.
-      - name: Build latest.json from release signatures
+      # Built from the release's own *.sig assets rather than per-runner, so the
+      # Windows, macOS and Linux entries always land in ONE manifest regardless
+      # of job order or failure.
+      - name: Build updater manifest from release signatures
         shell: bash
         run: |
           set -euo pipefail
 
+          if [[ "${{ matrix.app }}" == "admin" ]]; then
+            TAG="admin-v$VERSION"; MANIFEST="latest-admin.json"
+          else
+            TAG="v$VERSION"; MANIFEST="latest.json"
+          fi
+
           ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
-          echo "Release assets:"; echo "$ASSETS"
+          echo "Release assets for $TAG:"; echo "$ASSETS"
 
           PLATFORMS="{}"
           add_platform() {
