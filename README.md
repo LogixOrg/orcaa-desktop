@@ -77,6 +77,25 @@ Three layers:
 
 Push-when-truly-quit (after user picks Quit in tray) is a v2 concern — requires Windows Notification Service integration on the backend.
 
+### ⚠️ The remote-origin capability (read before touching `capabilities/`)
+
+This wrapper never loads a local page — the webview always sits on an `https://*.orcaa.cloud`
+origin. **Tauri rejects every IPC call from a remote origin** unless a capability lists that origin
+under `remote.urls`; `windows: ["main"]` alone only covers the *local* context. That grant lives in
+[`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json).
+
+Delete or narrow it and `plugin:notification|notify` gets denied — the PWA's `sendNativeNotification()`
+catches the rejection and returns `false`, so **the app looks completely healthy while no toast ever
+fires**. `default.json` stays `local`-only on purpose: the remote page gets notifications and nothing else.
+
+Note `https://*.orcaa.cloud` does **not** match the apex `https://orcaa.cloud` — that URL is listed
+separately (URLPattern semantics).
+
+Windows toasts additionally need the installed app's Start Menu shortcut to carry
+`System.AppUserModel.ID` = the bundle identifier. Tauri's NSIS installer does this automatically, which
+is why toasts only work from an **installed** build — `pnpm dev:business` runs out of `target/debug`,
+where the plugin deliberately skips setting the app ID.
+
 ---
 
 ## Local development
