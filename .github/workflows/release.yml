@@ -338,6 +338,13 @@ jobs:
 
   manifest:
     needs: [resolve, build]
+    # Runs even when some build jobs failed. `build` is now six jobs across two
+    # apps, so without this a single failing admin/platform job skips this job
+    # entirely and the BUSINESS release ships with no latest.json — which makes
+    # /releases/latest/download/latest.json 404 for every installed client and
+    # silently stops all updates. A partial manifest is far better than none;
+    # the step below still errors if an app produced no signed payloads at all.
+    if: ${{ !cancelled() }}
     name: Compose updater manifest (${{ matrix.app }})
     runs-on: ubuntu-latest
     permissions:
