@@ -263,7 +263,7 @@ Note: paste the **contents**, not the path. tauri-action expects the key as a st
 
 > **The tag does not set the version.** The workflow reads it from the app config
 > (`VERSION=$(jq -r '.version' "$CONF")`) and writes that into both the artifact
-> filenames and `latest.json`. Tag `v1.0.9` on a config that still says `1.0.0`
+> filenames and `latest.json`. Tag `v1.0.10` on a config that still says `1.0.0`
 > produces a release whose manifest advertises **1.0.0** — every installed client
 > compares `1.0.0 > 1.0.0`, decides it is current, and never updates. This
 > silently stalled updates for the whole 1.0.x line. Bump the config, always.
