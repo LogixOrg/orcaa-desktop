@@ -1,6 +1,6 @@
 {
   "name": "orcaa-desktop",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Tauri 2.x desktop wrapper for the Orcaa PWAs (Business + Admin)",
   "private": true,
   "type": "module",

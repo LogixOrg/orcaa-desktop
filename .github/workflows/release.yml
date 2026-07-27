@@ -81,9 +81,9 @@ jobs:
           done
 
           # THE guard. The tag does not set the version; the config does. Tagging
-          # v1.0.5 over a config still reading 1.0.8 publishes a release whose
-          # manifest advertises 1.0.8 — every client compares that against its own
-          # 1.0.8, correctly concludes it is current, and the update never ships.
+          # v1.0.5 over a config still reading 1.0.9 publishes a release whose
+          # manifest advertises 1.0.9 — every client compares that against its own
+          # 1.0.9, correctly concludes it is current, and the update never ships.
           # That silently stalled the entire 1.0.x line. Fail loudly instead.
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
             TAG_VERSION="${GITHUB_REF_NAME#admin-}"
