@@ -210,6 +210,11 @@ fn reveal_main_window(app: &AppHandle, shown: &Arc<AtomicBool>) {
 /// silences Tauri's own check — the engine still refuses.
 const SHELL_SCHEME: &str = "orcaa-shell";
 
+/// The real Orcaa mark, extracted from `shared/components/layout/logo/LogoSVG`
+/// so the shell shows the actual brand rather than a stand-in. Inlined at
+/// compile time — the wrapper serves no static files.
+const ORCAA_LOGO_SVG: &str = include_str!("../assets/orcaa-logo.svg");
+
 /// Windows serves custom schemes through `http://<scheme>.localhost`; the other
 /// platforms use the scheme directly. Webview *creation* converts this for us,
 /// but `navigate()` needs the already-converted form.
@@ -298,12 +303,8 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
     background: var(--card); border: 1px solid var(--border);
     border-radius: 18px; padding: 3rem 2.5rem;
   }}
-  .mark {{
-    width: 3rem; height: 3rem; margin: 0 auto 1.5rem; border-radius: 14px;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--brand); color: var(--on-brand);
-    font-size: 1.5rem; font-weight: 700; line-height: 1;
-  }}
+  .mark {{ margin: 0 auto 1.75rem; width: 11rem; }}
+  .mark svg {{ width: 100%; height: auto; display: block; }}
   h1 {{ font-size: 1.6rem; font-weight: 600; margin: 0 0 .75rem; line-height: 1.3; }}
   p {{ margin: 0 0 2rem; line-height: 1.7; font-size: 1rem; color: var(--text-soft); }}
   a.cta {{
@@ -317,12 +318,13 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
   @media (prefers-reduced-motion: reduce) {{ a.cta {{ transition: none; }} }}
 </style>
 <main>
-  <div class="mark" aria-hidden="true">O</div>
+  <div class="mark" role="img" aria-label="Orcaa">{logo}</div>
   <h1>{title}</h1>
   <p>{body}</p>
   <a class="cta" href="{auth_base}">{cta}</a>
 </main>
 </html>"##,
+        logo = ORCAA_LOGO_SVG,
         lang = strings.html_lang(),
         dir = if strings.is_rtl() { "rtl" } else { "ltr" },
         title = title,
