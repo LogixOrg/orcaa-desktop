@@ -67,6 +67,42 @@ fn is_auth_host(url: &Url) -> bool {
             .unwrap_or(false)
 }
 
+/// Any route that would render a sign-in surface inside the app.
+///
+/// The auth subdomain is the obvious one, but a tenant app also has its **own**
+/// `/login` — which is where an expired session or a sign-out lands you. Left
+/// alone, the desktop app renders that tenant login form directly, defeating
+/// the whole point of moving auth to the browser. Everything here is bounced to
+/// the shell's welcome page instead.
+fn is_sign_in_route(url: &Url) -> bool {
+    if is_auth_host(url) {
+        return true;
+    }
+    if !is_orcaa_host(url) {
+        return false;
+    }
+
+    let path = url.path().trim_end_matches('/');
+
+    // The handoff landings are how a browser sign-in RETURNS. Bouncing them
+    // would make the flow loop forever.
+    if path.starts_with("/desktop-handoff") || path.starts_with("/admin-handoff") {
+        return false;
+    }
+
+    [
+        "/login",
+        "/register",
+        "/forgot-password",
+        "/reset-password",
+        "/verify-email",
+        "/invite",
+        "/auth/",
+    ]
+    .iter()
+    .any(|route| path == route.trim_end_matches('/') || path.starts_with(route))
+}
+
 /// The registrable domain the tenant subdomains hang off, derived from whatever
 /// host the app is configured against so dev (`orcaa.test`) works unchanged.
 fn base_domain_of(url: &Url) -> String {
@@ -222,25 +258,66 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
 <meta charset="utf-8">
 <title>{title}</title>
 <style>
-  :root {{ color-scheme: light dark; }}
+  /* Values mirrored from shared/styles/themes/{{light,dark}}/variables.css.
+     They are copied, not invented: the shell renders before any app CSS
+     exists, so it cannot import the real tokens. Keep them in sync — and
+     never retune the brand here. Root font is 14px platform-wide, so 1rem
+     is 14px, not 16px. */
+  :root {{
+    color-scheme: light dark;
+    --brand: #0891b2;
+    --on-brand: #ffffff;
+    --ground: #f8fafc;
+    --card: #ffffff;
+    --text: #1e293b;
+    --text-soft: #64748b;
+    --border: rgba(8, 145, 178, 0.2);
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --brand: #00e0ff;
+      --on-brand: #0a0a19;
+      --ground: #0a0a19;
+      --card: #140f2d;
+      --text: rgba(255, 255, 255, 0.87);
+      --text-soft: rgba(255, 255, 255, 0.6);
+      --border: rgba(0, 224, 255, 0.2);
+    }}
+  }}
   * {{ box-sizing: border-box; }}
+  html {{ font-size: 14px; }}
   body {{
     margin: 0; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; text-align: center; padding: 2rem;
+    justify-content: center; padding: 2rem;
+    background: var(--ground); color: var(--text);
     font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
   }}
-  main {{ max-width: 26rem; }}
-  h1 {{ font-size: 1.5rem; font-weight: 600; margin: 0 0 .85rem; line-height: 1.3; }}
-  p {{ margin: 0 0 2rem; line-height: 1.65; opacity: .7; font-size: .9375rem; }}
+  main {{
+    max-width: 30rem; width: 100%; text-align: center;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 18px; padding: 3rem 2.5rem;
+  }}
+  .mark {{
+    width: 3rem; height: 3rem; margin: 0 auto 1.5rem; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--brand); color: var(--on-brand);
+    font-size: 1.5rem; font-weight: 700; line-height: 1;
+  }}
+  h1 {{ font-size: 1.6rem; font-weight: 600; margin: 0 0 .75rem; line-height: 1.3; }}
+  p {{ margin: 0 0 2rem; line-height: 1.7; font-size: 1rem; color: var(--text-soft); }}
   a.cta {{
-    display: inline-block; padding: .8rem 2rem; border-radius: .5rem;
-    text-decoration: none; font-size: .9375rem; font-weight: 600;
-    background: CanvasText; color: Canvas; border: 1px solid CanvasText;
+    display: inline-block; padding: .85rem 2.25rem; border-radius: 12px;
+    text-decoration: none; font-size: 1rem; font-weight: 600;
+    background: var(--brand); color: var(--on-brand); border: 0;
+    transition: filter .15s ease;
   }}
-  a.cta:hover {{ opacity: .85; }}
-  a.cta:focus-visible {{ outline: 2px solid CanvasText; outline-offset: 3px; }}
+  a.cta:hover {{ filter: brightness(1.08); }}
+  a.cta:focus-visible {{ outline: 2px solid var(--brand); outline-offset: 3px; }}
+  @media (prefers-reduced-motion: reduce) {{ a.cta {{ transition: none; }} }}
 </style>
 <main>
+  <div class="mark" aria-hidden="true">O</div>
   <h1>{title}</h1>
   <p>{body}</p>
   <a class="cta" href="{auth_base}">{cta}</a>
@@ -376,7 +453,7 @@ fn persist_session(app: &AppHandle) {
             // the shell's own sign-in scaffolding would reopen the app on its
             // waiting screen instead of the welcome screen, and saving the auth
             // host is pointless — the fallback already resolves there.
-            if is_orcaa_host(&url) && !is_auth_host(&url) {
+            if is_orcaa_host(&url) && !is_sign_in_route(&url) {
                 if let Ok(store) = app.store(STORE_FILE) {
                     store.set(STORE_KEY_LAST_URL, json!(url.to_string()));
                     let _ = store.save();
@@ -595,7 +672,7 @@ pub fn run() {
             // The saved URL is the page the user was last on, which may well be
             // the auth app. Sign-in never renders in here, so start the browser
             // flow instead and park on the holding page.
-            let needs_sign_in = is_auth_host(&initial_url);
+            let needs_sign_in = is_sign_in_route(&initial_url);
             let start_webview_url = if needs_sign_in {
                 tauri::WebviewUrl::CustomProtocol(shell_url(false, false))
             } else {
@@ -620,7 +697,7 @@ pub fn run() {
                 // One rule covers every route into sign-in: the initial load, a
                 // session expiring mid-use and bouncing to auth, and the retry
                 // link on the holding page.
-                if is_auth_host(url) {
+                if is_sign_in_route(url) {
                     let handle = nav_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         start_browser_sign_in(&handle);
