@@ -1,6 +1,6 @@
 [package]
 name = "orcaa-desktop"
-version = "1.0.13"
+version = "1.0.14"
 description = "Orcaa desktop wrapper (Business + Admin)"
 authors = ["Orcaa"]
 edition = "2021"
