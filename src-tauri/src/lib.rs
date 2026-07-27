@@ -7,7 +7,6 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::json;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -85,12 +84,20 @@ fn base_domain_of(url: &Url) -> String {
 
 fn is_internal_url(url: &Url) -> bool {
     match url.scheme() {
+        // The shell's own page arrives as `http://orcaa-shell.localhost` on
+        // Windows — it must be recognised here or `on_navigation` would hand
+        // the app's own UI to the system browser.
         "http" | "https" => url
             .host_str()
-            .map(|h| h == "orcaa.cloud" || h.ends_with(".orcaa.cloud") || h.ends_with(".orcaa.test"))
+            .map(|h| {
+                h == "orcaa.cloud"
+                    || h.ends_with(".orcaa.cloud")
+                    || h.ends_with(".orcaa.test")
+                    || h == format!("{SHELL_SCHEME}.localhost")
+            })
             .unwrap_or(false),
         "about" | "data" | "blob" | "tauri" => true,
-        _ => false,
+        s => s == SHELL_SCHEME,
     }
 }
 
@@ -150,63 +157,101 @@ fn reveal_main_window(app: &AppHandle, shown: &Arc<AtomicBool>) {
     }
 }
 
-/// The holding page shown while the user signs in elsewhere.
+/// The wrapper bundles no frontend assets (`frontendDist` is null — it only
+/// renders the remote PWA), so its one local page is served from a registered
+/// URI scheme instead.
 ///
-/// Delivered as a `data:` URL because the wrapper bundles no frontend assets
-/// (`frontendDist` is null — it only ever renders the remote PWA). Styling
-/// stays on system colors deliberately: the desktop shell must not introduce
-/// brand tokens that would then need maintaining alongside the real theme.
+/// It is emphatically **not** a `data:` URL: Chromium blocks top-level
+/// navigation to those, so WebView2 renders its own "can't reach this page"
+/// error instead of the markup. Tauri's `webview-data-url` feature only
+/// silences Tauri's own check — the engine still refuses.
+const SHELL_SCHEME: &str = "orcaa-shell";
+
+/// Windows serves custom schemes through `http://<scheme>.localhost`; the other
+/// platforms use the scheme directly. Webview *creation* converts this for us,
+/// but `navigate()` needs the already-converted form.
+fn shell_url(waiting: bool, converted: bool) -> Url {
+    let base = if converted && cfg!(windows) {
+        format!("http://{SHELL_SCHEME}.localhost/")
+    } else {
+        format!("{SHELL_SCHEME}://localhost/")
+    };
+
+    let mut url: Url = base.parse().expect("shell URL must parse");
+    if waiting {
+        url.set_query(Some("waiting=1"));
+    }
+    url
+}
+
+/// The shell's sign-in page.
 ///
-/// The retry control is a plain link back to the auth host. It needs no IPC —
-/// `on_navigation` already intercepts that host and restarts the browser flow,
-/// so one rule covers both the first attempt and every retry.
-fn signin_holding_page(strings: &Strings, auth_base: &str) -> String {
-    let dir = if strings.is_rtl() { "rtl" } else { "ltr" };
-    let html = format!(
+/// Two states, one document: an entry state with the primary call to action,
+/// and a waiting state once the browser has been handed control. Styling stays
+/// on system colors deliberately — the desktop shell must not introduce brand
+/// tokens that would then need maintaining alongside the real theme.
+///
+/// The button is a plain link to the auth host, which needs no IPC:
+/// `on_navigation` already intercepts that host, so the same rule drives the
+/// first click, a retry, and a session expiring mid-use.
+fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> String {
+    let (title, body, cta) = if waiting {
+        (
+            strings.signin_title(),
+            strings.signin_body(),
+            strings.signin_retry(),
+        )
+    } else {
+        (
+            strings.signin_welcome_title(),
+            strings.signin_welcome_body(),
+            strings.signin_cta(),
+        )
+    };
+
+    format!(
         r##"<!doctype html>
 <html lang="{lang}" dir="{dir}">
 <meta charset="utf-8">
 <title>{title}</title>
 <style>
   :root {{ color-scheme: light dark; }}
+  * {{ box-sizing: border-box; }}
   body {{
     margin: 0; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; text-align: center;
-    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    justify-content: center; text-align: center; padding: 2rem;
+    font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
   }}
-  main {{ max-width: 30rem; padding: 2rem; }}
-  h1 {{ font-size: 1.375rem; font-weight: 600; margin: 0 0 .75rem; }}
-  p {{ margin: 0 0 1.5rem; line-height: 1.6; opacity: .75; }}
-  a {{ display: inline-block; padding: .6rem 1.25rem; border-radius: .5rem;
-       border: 1px solid currentColor; text-decoration: none; color: inherit;
-       font-size: .875rem; }}
+  main {{ max-width: 26rem; }}
+  h1 {{ font-size: 1.5rem; font-weight: 600; margin: 0 0 .85rem; line-height: 1.3; }}
+  p {{ margin: 0 0 2rem; line-height: 1.65; opacity: .7; font-size: .9375rem; }}
+  a.cta {{
+    display: inline-block; padding: .8rem 2rem; border-radius: .5rem;
+    text-decoration: none; font-size: .9375rem; font-weight: 600;
+    background: CanvasText; color: Canvas; border: 1px solid CanvasText;
+  }}
+  a.cta:hover {{ opacity: .85; }}
+  a.cta:focus-visible {{ outline: 2px solid CanvasText; outline-offset: 3px; }}
 </style>
 <main>
   <h1>{title}</h1>
   <p>{body}</p>
-  <a href="{auth_base}">{retry}</a>
+  <a class="cta" href="{auth_base}">{cta}</a>
 </main>
 </html>"##,
         lang = strings.html_lang(),
-        dir = dir,
-        title = strings.signin_title(),
-        body = strings.signin_body(),
-        retry = strings.signin_retry(),
+        dir = if strings.is_rtl() { "rtl" } else { "ltr" },
+        title = title,
+        body = body,
+        cta = cta,
         auth_base = auth_base,
-    );
-
-    format!(
-        "data:text/html;charset=utf-8;base64,{}",
-        URL_SAFE_NO_PAD.encode(html)
     )
 }
 
-/// Kicks off (or restarts) browser sign-in: opens the system browser and parks
-/// the window on the holding page.
+/// Hands sign-in to the system browser and switches the window to the waiting
+/// state. Driven by the user clicking the call to action — the browser is never
+/// opened behind their back on launch.
 fn start_browser_sign_in(app: &AppHandle) {
-    let Some(strings) = app.try_state::<Strings>() else {
-        return;
-    };
     let Some(config) = app.try_state::<AppUrls>() else {
         return;
     };
@@ -227,9 +272,8 @@ fn start_browser_sign_in(app: &AppHandle) {
     }
 
     if let Some(window) = app.get_webview_window("main") {
-        let holding = signin_holding_page(&strings, &config.auth_base);
-        if let Err(err) = window.navigate(holding.parse().expect("holding page URL must parse")) {
-            log::error!("failed to show the sign-in holding page: {err}");
+        if let Err(err) = window.navigate(shell_url(true, true)) {
+            log::error!("failed to show the waiting page: {err}");
         }
     }
 }
@@ -407,6 +451,31 @@ async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bool) 
 
 pub fn run() {
     tauri::Builder::default()
+        // Serves the shell's own sign-in page. Everything it needs is derived
+        // from config here rather than read from managed state, so the page
+        // cannot depend on setup having run first.
+        .register_uri_scheme_protocol(SHELL_SCHEME, |ctx, request| {
+            let app = ctx.app_handle();
+            let product = app
+                .config()
+                .product_name
+                .clone()
+                .unwrap_or_else(|| "Orcaa".into());
+            let identifier = app.config().identifier.clone();
+
+            let fallback: Url = fallback_url(&identifier)
+                .parse()
+                .expect("fallback URL must parse");
+            let auth_base = format!("https://auth.{}", base_domain_of(&fallback));
+
+            let waiting = request.uri().query().unwrap_or_default().contains("waiting");
+            let html = holding_page_html(&Strings::detect(product), &auth_base, waiting);
+
+            tauri::http::Response::builder()
+                .header(tauri::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(html.into_bytes())
+                .expect("shell page response must build")
+        })
         // Must be registered FIRST. On Windows an `orcaa://` link launches a
         // whole new process with the URL in argv; the single-instance plugin's
         // `deep-link` feature forwards it into the running app so `on_open_url`
@@ -474,12 +543,10 @@ pub fn run() {
             // the auth app. Sign-in never renders in here, so start the browser
             // flow instead and park on the holding page.
             let needs_sign_in = is_auth_host(&initial_url);
-            let start_url: Url = if needs_sign_in {
-                signin_holding_page(&strings, &app.state::<AppUrls>().auth_base)
-                    .parse()
-                    .expect("holding page URL must parse")
+            let start_webview_url = if needs_sign_in {
+                tauri::WebviewUrl::CustomProtocol(shell_url(false, false))
             } else {
-                initial_url
+                tauri::WebviewUrl::External(initial_url)
             };
 
             // Set before the window exists so a `single_instance` re-launch
@@ -490,11 +557,7 @@ pub fn run() {
             let load_handle = app.handle().clone();
             let load_shown = shown.clone();
 
-            tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::External(start_url),
-            )
+            tauri::WebviewWindowBuilder::new(app, "main", start_webview_url)
             .title(&product_name)
             .inner_size(1440.0, 900.0)
             .min_inner_size(1024.0, 640.0)
@@ -521,6 +584,7 @@ pub fn run() {
             })
             .on_page_load(move |_window, payload| {
                 if matches!(payload.event(), PageLoadEvent::Finished) {
+                    log::info!("page loaded: {}", payload.url());
                     reveal_main_window(&load_handle, &load_shown);
                 }
             })
@@ -543,10 +607,6 @@ pub fn run() {
                 for url in urls {
                     complete_browser_sign_in(&cold_handle, &url);
                 }
-            }
-
-            if needs_sign_in {
-                start_browser_sign_in(&app.handle().clone());
             }
 
             // Safety net: a failed or endlessly-hanging load must still end up

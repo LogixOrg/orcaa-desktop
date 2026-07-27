@@ -103,6 +103,24 @@ impl Strings {
         }
     }
 
+    pub fn signin_welcome_title(&self) -> String {
+        match self.lang {
+            Lang::En => format!("Welcome to {}", self.product),
+            Lang::Ar => format!("مرحباً بك في {}", self.product),
+        }
+    }
+
+    pub fn signin_welcome_body(&self) -> String {
+        self.pick(
+            "Sign in or create your account to get started. We'll open your browser so your password manager and Google sign-in work normally.",
+            "سجّل الدخول أو أنشئ حسابك للبدء. سنفتح متصفحك ليعمل مدير كلمات المرور وتسجيل الدخول بجوجل كالمعتاد.",
+        )
+    }
+
+    pub fn signin_cta(&self) -> String {
+        self.pick("Log in or sign up", "تسجيل الدخول أو إنشاء حساب")
+    }
+
     pub fn signin_title(&self) -> String {
         self.pick("Continue in your browser", "أكمِل من المتصفح")
     }
