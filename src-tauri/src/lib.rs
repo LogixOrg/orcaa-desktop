@@ -82,23 +82,30 @@ fn base_domain_of(url: &Url) -> String {
         .unwrap_or_else(|| "orcaa.cloud".to_string())
 }
 
-fn is_internal_url(url: &Url) -> bool {
-    match url.scheme() {
-        // The shell's own page arrives as `http://orcaa-shell.localhost` on
-        // Windows — it must be recognised here or `on_navigation` would hand
-        // the app's own UI to the system browser.
-        "http" | "https" => url
+/// A real Orcaa web address — as opposed to the shell's own scaffolding page.
+fn is_orcaa_host(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url
             .host_str()
             .map(|h| {
-                h == "orcaa.cloud"
-                    || h.ends_with(".orcaa.cloud")
-                    || h.ends_with(".orcaa.test")
-                    || h == format!("{SHELL_SCHEME}.localhost")
+                h == "orcaa.cloud" || h.ends_with(".orcaa.cloud") || h.ends_with(".orcaa.test")
             })
-            .unwrap_or(false),
-        "about" | "data" | "blob" | "tauri" => true,
-        s => s == SHELL_SCHEME,
-    }
+            .unwrap_or(false)
+}
+
+/// The shell's own page, which arrives as `http://orcaa-shell.localhost` on
+/// Windows and `orcaa-shell://` elsewhere.
+fn is_shell_url(url: &Url) -> bool {
+    url.scheme() == SHELL_SCHEME
+        || url.host_str() == Some(&format!("{SHELL_SCHEME}.localhost"))
+}
+
+fn is_internal_url(url: &Url) -> bool {
+    // The shell page must be recognised here, or `on_navigation` would hand the
+    // app's own UI to the system browser.
+    is_orcaa_host(url)
+        || is_shell_url(url)
+        || matches!(url.scheme(), "about" | "data" | "blob" | "tauri")
 }
 
 /// Shrinks the window to fit the monitor it opened on, and re-centres it if it
@@ -248,6 +255,46 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
     )
 }
 
+#[cfg(test)]
+mod shell_page_tests {
+    use super::*;
+
+    #[test]
+    fn both_states_render_a_call_to_action_pointing_at_the_auth_host() {
+        let strings = Strings::detect("Orcaa".to_string());
+
+        for waiting in [false, true] {
+            let html = holding_page_html(&strings, "https://auth.orcaa.cloud", waiting);
+            assert!(html.contains("<a class=\"cta\" href=\"https://auth.orcaa.cloud\">"));
+            assert!(html.contains("<h1>"));
+        }
+    }
+
+    #[test]
+    fn the_shell_page_is_never_stored_as_the_last_visited_url() {
+        // Storing it reopened the app on its own waiting screen instead of the
+        // welcome screen.
+        for raw in [
+            "http://orcaa-shell.localhost/",
+            "http://orcaa-shell.localhost/?waiting=1",
+            "orcaa-shell://localhost/",
+        ] {
+            let url: Url = raw.parse().unwrap();
+            assert!(is_shell_url(&url), "{raw} should be recognised as the shell");
+            assert!(!is_orcaa_host(&url), "{raw} must not be persisted");
+            // Still internal — it must never be handed to the system browser.
+            assert!(is_internal_url(&url));
+        }
+    }
+
+    #[test]
+    fn real_tenant_pages_are_still_persisted() {
+        let url: Url = "https://clinic.orcaa.cloud/dashboard".parse().unwrap();
+        assert!(is_orcaa_host(&url));
+        assert!(!is_auth_host(&url));
+    }
+}
+
 /// Hands sign-in to the system browser and switches the window to the waiting
 /// state. Driven by the user clicking the call to action — the browser is never
 /// opened behind their back on launch.
@@ -325,9 +372,15 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 fn persist_session(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(url) = window.url() {
-            if let Ok(store) = app.store(STORE_FILE) {
-                store.set(STORE_KEY_LAST_URL, json!(url.to_string()));
-                let _ = store.save();
+            // Only ever remember a real page the user was working on. Saving
+            // the shell's own sign-in scaffolding would reopen the app on its
+            // waiting screen instead of the welcome screen, and saving the auth
+            // host is pointless — the fallback already resolves there.
+            if is_orcaa_host(&url) && !is_auth_host(&url) {
+                if let Ok(store) = app.store(STORE_FILE) {
+                    store.set(STORE_KEY_LAST_URL, json!(url.to_string()));
+                    let _ = store.save();
+                }
             }
         }
     }
