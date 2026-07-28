@@ -398,7 +398,7 @@ fn start_browser_sign_in(app: &AppHandle) {
     };
     let pending = app.state::<PendingSignIn>();
 
-    let Some(browser_url) = pending.begin(&config.auth_base) else {
+    let Some(browser_url) = pending.begin(&config.auth_base, &config.deep_link_scheme) else {
         log::error!("failed to start browser sign-in");
         return;
     };
@@ -426,7 +426,10 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
         return;
     };
 
-    let Some(resolved) = app.state::<PendingSignIn>().resolve(incoming, &config.base_domain) else {
+    let Some(resolved) = app
+        .state::<PendingSignIn>()
+        .resolve(incoming, &config.base_domain, &config.deep_link_scheme)
+    else {
         // Unsolicited, replayed, or tampered — indistinguishable on purpose.
         log::warn!("ignoring a deep link that does not match a pending sign-in");
         return;
@@ -448,6 +451,11 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
 struct AppUrls {
     auth_base: String,
     base_domain: String,
+    /// This build's deep-link scheme. Business and admin ship from one codebase
+    /// but must never share one — Windows gives a scheme to whichever installer
+    /// ran last, so a shared scheme means one app silently swallows the other's
+    /// sign-in callbacks.
+    deep_link_scheme: String,
 }
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
@@ -704,6 +712,11 @@ pub fn run() {
             app.manage(AppUrls {
                 auth_base: format!("https://auth.{}", base_domain_of(&fallback_url)),
                 base_domain: base_domain_of(&fallback_url),
+                deep_link_scheme: if identifier.contains("admin") {
+                    "orcaa-admin".to_string()
+                } else {
+                    "orcaa".to_string()
+                },
             });
             app.manage(PendingSignIn::default());
             app.manage(strings.clone());

@@ -59,7 +59,7 @@ impl PendingSignIn {
     /// Replaces any previous attempt: if someone restarts sign-in, only the
     /// newest callback should be honoured (the backend likewise deletes the
     /// older ticket).
-    pub fn begin(&self, auth_base: &str) -> Option<Url> {
+    pub fn begin(&self, auth_base: &str, scheme: &str) -> Option<Url> {
         let attempt = Attempt {
             state: random_token(32),
             verifier: random_token(64),
@@ -70,7 +70,11 @@ impl PendingSignIn {
         url.query_pairs_mut()
             .append_pair("desktop", "1")
             .append_pair("ds", &attempt.state)
-            .append_pair("dc", &challenge_for(&attempt.verifier));
+            .append_pair("dc", &challenge_for(&attempt.verifier))
+            // Which scheme to call back on. Both desktop builds share this
+            // codebase but must NOT share a scheme: whichever installed last
+            // would win the registration and swallow the other's callbacks.
+            .append_pair("dsch", scheme);
 
         *self.0.lock().ok()? = Some(attempt);
 
@@ -83,8 +87,8 @@ impl PendingSignIn {
     /// without a pending attempt, a mismatched `state`, a missing ticket, or a
     /// subdomain that isn't a plain label. Callers must not surface the
     /// difference; a hostile link should look exactly like a stale one.
-    pub fn resolve(&self, incoming: &Url, base_domain: &str) -> Option<Resolved> {
-        if incoming.scheme() != "orcaa" {
+    pub fn resolve(&self, incoming: &Url, base_domain: &str, scheme: &str) -> Option<Resolved> {
+        if incoming.scheme() != scheme {
             return None;
         }
 
@@ -166,7 +170,7 @@ mod tests {
 
     fn begin() -> (PendingSignIn, String) {
         let pending = PendingSignIn::default();
-        let url = pending.begin("https://auth.orcaa.cloud").unwrap();
+        let url = pending.begin("https://auth.orcaa.cloud", "orcaa").unwrap();
         let state = url
             .query_pairs()
             .find(|(k, _)| k == "ds")
@@ -179,7 +183,7 @@ mod tests {
     #[test]
     fn browser_url_carries_the_challenge_not_the_verifier() {
         let pending = PendingSignIn::default();
-        let url = pending.begin("https://auth.orcaa.cloud").unwrap();
+        let url = pending.begin("https://auth.orcaa.cloud", "orcaa").unwrap();
         let query = url.query().unwrap();
 
         assert!(query.contains("desktop=1"));
@@ -208,7 +212,7 @@ mod tests {
         let incoming =
             Url::parse(&format!("orcaa://auth?state={state}&token=abc&subdomain=clinic")).unwrap();
 
-        let resolved = pending.resolve(&incoming, "orcaa.cloud").unwrap();
+        let resolved = pending.resolve(&incoming, "orcaa.cloud", "orcaa").unwrap();
 
         assert_eq!(resolved.url.host_str(), Some("clinic.orcaa.cloud"));
         assert_eq!(resolved.url.path(), "/desktop-handoff");
@@ -221,7 +225,7 @@ mod tests {
         let incoming =
             Url::parse("orcaa://auth?state=forged&token=abc&subdomain=clinic").unwrap();
 
-        assert!(pending.resolve(&incoming, "orcaa.cloud").is_none());
+        assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none());
     }
 
     #[test]
@@ -229,7 +233,7 @@ mod tests {
         let pending = PendingSignIn::default();
         let incoming = Url::parse("orcaa://auth?state=x&token=abc&subdomain=clinic").unwrap();
 
-        assert!(pending.resolve(&incoming, "orcaa.cloud").is_none());
+        assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none());
     }
 
     #[test]
@@ -238,8 +242,8 @@ mod tests {
         let incoming =
             Url::parse(&format!("orcaa://auth?state={state}&token=abc&subdomain=clinic")).unwrap();
 
-        assert!(pending.resolve(&incoming, "orcaa.cloud").is_some());
-        assert!(pending.resolve(&incoming, "orcaa.cloud").is_none());
+        assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_some());
+        assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none());
     }
 
     #[test]
@@ -252,7 +256,7 @@ mod tests {
             .unwrap();
 
             assert!(
-                pending.resolve(&incoming, "orcaa.cloud").is_none(),
+                pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none(),
                 "subdomain {hostile:?} should have been rejected"
             );
         }
