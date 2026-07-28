@@ -15,6 +15,7 @@ use tauri::{
     AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
@@ -526,6 +527,27 @@ async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bool) 
                 update.current_version,
                 update.version
             );
+
+            // Ask first. Swapping the binary and restarting under someone who is
+            // mid-task is not ours to decide — especially on a reception desk
+            // with a patient waiting.
+            let accepted = app
+                .dialog()
+                .message(strings.update_prompt_body(&update.current_version, &update.version))
+                .title(strings.update_prompt_title())
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    strings.update_install_now(),
+                    strings.update_remind_later(),
+                ))
+                .blocking_show();
+
+            if !accepted {
+                // Deliberately no re-prompt this session — the next launch asks
+                // again. Nagging is how people learn to dismiss on reflex.
+                log::info!("user postponed the update");
+                return;
+            }
+
             notify(
                 &app,
                 &strings.update_downloading_title(),
@@ -616,6 +638,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)

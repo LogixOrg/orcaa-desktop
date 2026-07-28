@@ -144,6 +144,37 @@ impl Strings {
 
     // ---- Updater ------------------------------------------------------
 
+    // ---- Update prompt (asks before installing) -----------------------
+
+    pub fn update_prompt_title(&self) -> String {
+        match self.lang {
+            Lang::En => format!("A new version of {} is available", self.product),
+            Lang::Ar => format!("يتوفر إصدار جديد من {}", self.product),
+        }
+    }
+
+    /// Shows both versions so the user can see exactly what changes.
+    pub fn update_prompt_body(&self, current: &str, next: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "{current} → {next}\n\nWould you like to install it now? {} will restart and take you back to where you left off.",
+                self.product
+            ),
+            Lang::Ar => format!(
+                "{current} ← {next}\n\nهل تريد تثبيته الآن؟ سيُعاد تشغيل {} وسيعيدك إلى حيث توقفت.",
+                self.product
+            ),
+        }
+    }
+
+    pub fn update_install_now(&self) -> String {
+        self.pick("Install now", "التثبيت الآن")
+    }
+
+    pub fn update_remind_later(&self) -> String {
+        self.pick("Remind me later", "ذكّرني لاحقاً")
+    }
+
     pub fn update_downloading_title(&self) -> String {
         self.pick("Update available", "يتوفر تحديث")
     }
