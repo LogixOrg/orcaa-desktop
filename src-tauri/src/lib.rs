@@ -219,6 +219,11 @@ const ORCAA_LOGO_SVG: &str = include_str!("../assets/orcaa-logo.svg");
 /// Windows serves custom schemes through `http://<scheme>.localhost`; the other
 /// platforms use the scheme directly. Webview *creation* converts this for us,
 /// but `navigate()` needs the already-converted form.
+/// Query flag the welcome page's button carries. Navigation to a sign-in route
+/// (logout, expired session, launch) only ever *shows* that page — the browser
+/// is opened when, and only when, the user presses the button.
+const SHELL_ACTION_SIGNIN: &str = "action=signin";
+
 fn shell_url(waiting: bool, converted: bool) -> Url {
     let base = if converted && cfg!(windows) {
         format!("http://{SHELL_SCHEME}.localhost/")
@@ -243,7 +248,8 @@ fn shell_url(waiting: bool, converted: bool) -> Url {
 /// The button is a plain link to the auth host, which needs no IPC:
 /// `on_navigation` already intercepts that host, so the same rule drives the
 /// first click, a retry, and a session expiring mid-use.
-fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> String {
+fn holding_page_html(strings: &Strings, _auth_base: &str, waiting: bool) -> String {
+    let action_href = format!("{}?{SHELL_ACTION_SIGNIN}", shell_url(false, true));
     let (title, body, cta) = if waiting {
         (
             strings.signin_title(),
@@ -322,7 +328,7 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
   <div class="mark" role="img" aria-label="Orcaa">{logo}</div>
   <h1>{title}</h1>
   <p>{body}</p>
-  <a class="cta" href="{auth_base}">{cta}</a>
+  <a class="cta" href="{action}">{cta}</a>
 </main>
 </html>"##,
         logo = ORCAA_LOGO_SVG,
@@ -331,7 +337,7 @@ fn holding_page_html(strings: &Strings, auth_base: &str, waiting: bool) -> Strin
         title = title,
         body = body,
         cta = cta,
-        auth_base = auth_base,
+        action = action_href,
     )
 }
 
@@ -340,12 +346,20 @@ mod shell_page_tests {
     use super::*;
 
     #[test]
-    fn both_states_render_a_call_to_action_pointing_at_the_auth_host() {
+    fn the_button_targets_the_shell_action_never_the_auth_host_directly() {
         let strings = Strings::detect("Orcaa".to_string());
 
         for waiting in [false, true] {
             let html = holding_page_html(&strings, "https://auth.orcaa.cloud", waiting);
-            assert!(html.contains("<a class=\"cta\" href=\"https://auth.orcaa.cloud\">"));
+
+            // Pressing the button is the ONLY thing that may open the browser.
+            // If this href pointed at the auth host, merely *landing* on the
+            // page — which is what a sign-out does — would hijack the browser.
+            assert!(html.contains(SHELL_ACTION_SIGNIN), "button must carry the action flag");
+            assert!(
+                !html.contains("href=\"https://auth."),
+                "the button must not link straight to the auth host"
+            );
             assert!(html.contains("<h1>"));
         }
     }
@@ -684,11 +698,11 @@ pub fn run() {
                 .expect("fallback URL must parse");
 
             let fallback_url: Url = fallback.parse().expect("fallback URL must parse");
+            // auth.* is the ONLY sign-in surface, for every guard including
+            // platform admins — the admin app now ships a /login shim that
+            // forwards here. Both desktop builds therefore hop to the same host.
             app.manage(AppUrls {
-                auth_base: format!(
-                    "https://auth.{}",
-                    base_domain_of(&fallback_url)
-                ),
+                auth_base: format!("https://auth.{}", base_domain_of(&fallback_url)),
                 base_domain: base_domain_of(&fallback_url),
             });
             app.manage(PendingSignIn::default());
@@ -722,10 +736,25 @@ pub fn run() {
                 // One rule covers every route into sign-in: the initial load, a
                 // session expiring mid-use and bouncing to auth, and the retry
                 // link on the holding page.
-                if is_sign_in_route(url) {
+                // The button was pressed — this is the ONLY path that opens
+                // the browser.
+                if is_shell_url(url) && url.query().unwrap_or_default().contains("action=signin") {
                     let handle = nav_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         start_browser_sign_in(&handle);
+                    });
+                    return false;
+                }
+
+                // Logging out, or a session expiring, lands here. Show the
+                // welcome page and stop — hijacking someone's browser the
+                // instant they sign out is hostile. They asked to leave.
+                if is_sign_in_route(url) {
+                    let handle = nav_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.navigate(shell_url(false, true));
+                        }
                     });
                     return false;
                 }
