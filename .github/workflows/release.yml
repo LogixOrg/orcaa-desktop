@@ -441,3 +441,26 @@ jobs:
 
           echo "$MANIFEST:"; cat "$MANIFEST"
           gh release upload "$TAG" "$MANIFEST" -R "$GITHUB_REPOSITORY" --clobber
+
+          # The admin manifest also has to live on the newest NON-prerelease
+          # release, because that is what /releases/latest/ resolves to and the
+          # admin app's updater endpoint is
+          #   /releases/latest/download/latest-admin.json
+          #
+          # Admin releases are prereleases on purpose (it keeps the landing
+          # page's stable download URLs pointing at business builds), so that
+          # path can never resolve to an admin release. Without this copy the
+          # admin updater 404s forever — which it had been doing since day one.
+          #
+          # `/releases/latest` in the API has exactly the same "newest published
+          # non-prerelease" semantics as the download redirect, so this tracks it
+          # rather than guessing a tag.
+          if [[ "${{ matrix.app }}" == "admin" ]]; then
+            LATEST_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+            if [[ -n "$LATEST_TAG" ]]; then
+              gh release upload "$LATEST_TAG" "$MANIFEST" -R "$GITHUB_REPOSITORY" --clobber
+              echo "Also published $MANIFEST to $LATEST_TAG so /releases/latest/ can serve it"
+            else
+              echo "::warning::No published non-prerelease found — admin updater will 404 until a business release exists"
+            fi
+          fi
