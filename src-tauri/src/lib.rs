@@ -1,47 +1,57 @@
 mod i18n;
+mod notify;
+mod shell_page;
 mod signin;
+mod updater;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::time::Duration;
 
 use serde_json::json;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    webview::PageLoadEvent,
-    AppHandle, Manager, WindowEvent,
+    webview::{DownloadEvent, PageLoadEvent},
+    AppHandle, Manager, WebviewWindow, WindowEvent,
 };
+use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_deep_link::DeepLinkExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
-use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_window_state::{AppHandleExt as WindowStateExt, StateFlags};
 use url::Url;
 
 use crate::i18n::Strings;
+use crate::shell_page::{
+    holding_page_html, loading_page_html, shell_init_js, shell_url, update_page_html, ShellPage,
+    SHELL_SCHEME,
+};
 use crate::signin::PendingSignIn;
+use crate::updater::PendingUpdate;
 
-const STORE_FILE: &str = "orcaa-desktop.json";
+pub(crate) const STORE_FILE: &str = "orcaa-desktop.json";
 const STORE_KEY_LAST_URL: &str = "last_url";
 const STORE_KEY_TRAY_HINT_SEEN: &str = "tray_hint_seen";
+const STORE_KEY_ZOOM: &str = "zoom_level";
 
 const FALLBACK_URL_BUSINESS: &str = "https://auth.orcaa.cloud";
 const FALLBACK_URL_ADMIN: &str = "https://admin.orcaa.cloud";
 
-/// How long to wait for the remote app to paint before showing the window
-/// anyway. Without a ceiling a dead network would leave the user staring at a
-/// tray icon and no window at all.
-const FIRST_PAINT_TIMEOUT: Duration = Duration::from_secs(12);
+const MAIN_WINDOW: &str = "main";
 
 /// Delay before the startup update check. Long enough that the window has
 /// painted and the WebSocket has connected, so we're never swapping the binary
 /// out from under someone who is still watching the app boot.
 const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(20);
+
+/// The zoom ladder, matching what a browser offers. Rust owns it rather than the
+/// webview so the level survives a restart — a wrapper that forgets how big you
+/// made the text every time you quit is the sort of detail that makes an app
+/// feel unfinished.
+const ZOOM_STEPS: [f64; 12] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5,
+];
+const ZOOM_DEFAULT_INDEX: usize = 5;
 
 /// Size, position and maximized/fullscreen are restored between launches.
 /// Visibility deliberately is **not** — the app hides to tray on close, so
@@ -75,7 +85,7 @@ fn is_auth_host(url: &Url) -> bool {
 /// alone, the desktop app renders that tenant login form directly, defeating
 /// the whole point of moving auth to the browser. Everything here is bounced to
 /// the shell's welcome page instead.
-fn is_sign_in_route(url: &Url) -> bool {
+pub(crate) fn is_sign_in_route(url: &Url) -> bool {
     if is_auth_host(url) {
         return true;
     }
@@ -120,7 +130,7 @@ fn base_domain_of(url: &Url) -> String {
 }
 
 /// A real Orcaa web address — as opposed to the shell's own scaffolding page.
-fn is_orcaa_host(url: &Url) -> bool {
+pub(crate) fn is_orcaa_host(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url
             .host_str()
@@ -130,268 +140,129 @@ fn is_orcaa_host(url: &Url) -> bool {
             .unwrap_or(false)
 }
 
-/// The shell's own page, which arrives as `http://orcaa-shell.localhost` on
+/// The shell's own pages, which arrive as `http://orcaa-shell.localhost` on
 /// Windows and `orcaa-shell://` elsewhere.
 fn is_shell_url(url: &Url) -> bool {
-    url.scheme() == SHELL_SCHEME
-        || url.host_str() == Some(&format!("{SHELL_SCHEME}.localhost"))
+    url.scheme() == SHELL_SCHEME || url.host_str() == Some(&format!("{SHELL_SCHEME}.localhost"))
 }
 
 fn is_internal_url(url: &Url) -> bool {
-    // The shell page must be recognised here, or `on_navigation` would hand the
+    // The shell pages must be recognised here, or `on_navigation` would hand the
     // app's own UI to the system browser.
     is_orcaa_host(url)
         || is_shell_url(url)
         || matches!(url.scheme(), "about" | "data" | "blob" | "tauri")
 }
 
-/// Shrinks the window to fit the monitor it opened on, and re-centres it if it
-/// had to shrink.
+// ---------------------------------------------------------------------------
+// Window geometry
+// ---------------------------------------------------------------------------
+
+/// Fits a window rectangle inside a monitor's work area.
 ///
-/// Two cases this catches: the 1440x900 default is larger than the 1366x768
-/// panels a lot of clinic reception desks run, and a geometry restored from a
-/// big external display would otherwise reopen off-screen on a laptop. Uses the
-/// monitor's *work area* so the window never hides behind the taskbar.
-fn fit_window_to_monitor(window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = window.current_monitor() else {
-        return;
-    };
+/// Both rectangles are `(x, y, width, height)` in physical pixels. Size is
+/// clamped first, because a window wider than the screen has no position that
+/// would fit it.
+///
+/// This exists because `tauri-plugin-window-state` restores a saved position
+/// verbatim whenever the saved rectangle *intersects* any monitor — mere
+/// intersection, not containment. A window dragged until its title bar sat above
+/// the top edge of the screen therefore came back exactly like that on the next
+/// launch, with the minimise/restore/close buttons sliced in half and no way to
+/// grab the title bar to fix it.
+pub(crate) fn clamped_rect(
+    window: (i32, i32, u32, u32),
+    area: (i32, i32, u32, u32),
+) -> (i32, i32, u32, u32) {
+    let (x, y, w, h) = window;
+    let (ax, ay, aw, ah) = area;
 
-    let work_area = monitor.work_area();
-    let (max_w, max_h) = (work_area.size.width, work_area.size.height);
+    let w = w.min(aw);
+    let h = h.min(ah);
 
-    let Ok(size) = window.outer_size() else {
-        return;
-    };
+    // `max` before `min` so a work area smaller than the window still pins the
+    // window's top-left corner on screen rather than off the far edge.
+    let x = x.min(ax + aw as i32 - w as i32).max(ax);
+    let y = y.min(ay + ah as i32 - h as i32).max(ay);
 
-    if size.width <= max_w && size.height <= max_h {
+    (x, y, w, h)
+}
+
+/// Pulls a window fully onto the work area of the monitor it sits on.
+///
+/// Uses the *work* area, not the full monitor bounds, so the window never hides
+/// under the taskbar either.
+fn clamp_window_to_work_area(window: &WebviewWindow) {
+    // Maximised and fullscreen geometry belongs to the OS; touching it would
+    // un-maximise the window.
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
         return;
     }
 
-    let fitted = tauri::PhysicalSize::new(size.width.min(max_w), size.height.min(max_h));
-    if window.set_size(fitted).is_ok() {
-        let _ = window.center();
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return;
+    };
+
+    // Resolved from the window's centre, not its origin: an origin that is
+    // already off-screen resolves to the wrong monitor, or to none at all.
+    let cx = pos.x as f64 + size.width as f64 / 2.0;
+    let cy = pos.y as f64 + size.height as f64 / 2.0;
+
+    let monitor = match window.monitor_from_point(cx, cy) {
+        Ok(Some(monitor)) => Some(monitor),
+        _ => window
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.primary_monitor().ok().flatten()),
+    };
+
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let work = monitor.work_area();
+
+    let (x, y, w, h) = clamped_rect(
+        (pos.x, pos.y, size.width, size.height),
+        (
+            work.position.x,
+            work.position.y,
+            work.size.width,
+            work.size.height,
+        ),
+    );
+
+    // Size first: on Windows a resize can shift the origin, so setting the
+    // position afterwards is what makes the result stick.
+    if (w, h) != (size.width, size.height) {
+        let _ = window.set_size(tauri::PhysicalSize::new(w, h));
+    }
+    if (x, y) != (pos.x, pos.y) {
+        log::info!("pulled the window back on screen: ({},{}) -> ({x},{y})", pos.x, pos.y);
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }
 
 fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
 }
 
-/// Reveals the window the first time the remote app paints.
-///
-/// The window is built hidden so the user never sees WebView2's blank white
-/// canvas while the PWA boots. Guarded by `shown` because `on_page_load` fires
-/// on *every* navigation — without it, an in-app route change would yank the
-/// window back out of the tray after the user deliberately hid it.
-fn reveal_main_window(app: &AppHandle, shown: &Arc<AtomicBool>) {
-    if shown.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        // Runs after the window-state plugin has restored geometry, so this
-        // sees the size the user is actually about to get.
-        fit_window_to_monitor(&window);
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
-/// The wrapper bundles no frontend assets (`frontendDist` is null — it only
-/// renders the remote PWA), so its one local page is served from a registered
-/// URI scheme instead.
-///
-/// It is emphatically **not** a `data:` URL: Chromium blocks top-level
-/// navigation to those, so WebView2 renders its own "can't reach this page"
-/// error instead of the markup. Tauri's `webview-data-url` feature only
-/// silences Tauri's own check — the engine still refuses.
-const SHELL_SCHEME: &str = "orcaa-shell";
-
-/// The real Orcaa mark, extracted from `shared/components/layout/logo/LogoSVG`
-/// so the shell shows the actual brand rather than a stand-in. Inlined at
-/// compile time — the wrapper serves no static files.
-const ORCAA_LOGO_SVG: &str = include_str!("../assets/orcaa-logo.svg");
-
-/// Windows serves custom schemes through `http://<scheme>.localhost`; the other
-/// platforms use the scheme directly. Webview *creation* converts this for us,
-/// but `navigate()` needs the already-converted form.
-/// Query flag the welcome page's button carries. Navigation to a sign-in route
-/// (logout, expired session, launch) only ever *shows* that page — the browser
-/// is opened when, and only when, the user presses the button.
-const SHELL_ACTION_SIGNIN: &str = "action=signin";
-
-fn shell_url(waiting: bool, converted: bool) -> Url {
-    let base = if converted && cfg!(windows) {
-        format!("http://{SHELL_SCHEME}.localhost/")
-    } else {
-        format!("{SHELL_SCHEME}://localhost/")
-    };
-
-    let mut url: Url = base.parse().expect("shell URL must parse");
-    if waiting {
-        url.set_query(Some("waiting=1"));
-    }
-    url
-}
-
-/// The shell's sign-in page.
-///
-/// Two states, one document: an entry state with the primary call to action,
-/// and a waiting state once the browser has been handed control. Styling stays
-/// on system colors deliberately — the desktop shell must not introduce brand
-/// tokens that would then need maintaining alongside the real theme.
-///
-/// The button is a plain link to the auth host, which needs no IPC:
-/// `on_navigation` already intercepts that host, so the same rule drives the
-/// first click, a retry, and a session expiring mid-use.
-fn holding_page_html(strings: &Strings, _auth_base: &str, waiting: bool) -> String {
-    let action_href = format!("{}?{SHELL_ACTION_SIGNIN}", shell_url(false, true));
-    let (title, body, cta) = if waiting {
-        (
-            strings.signin_title(),
-            strings.signin_body(),
-            strings.signin_retry(),
-        )
-    } else {
-        (
-            strings.signin_welcome_title(),
-            strings.signin_welcome_body(),
-            strings.signin_cta(),
-        )
-    };
-
-    format!(
-        r##"<!doctype html>
-<html lang="{lang}" dir="{dir}">
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-  /* Values mirrored from shared/styles/themes/{{light,dark}}/variables.css.
-     They are copied, not invented: the shell renders before any app CSS
-     exists, so it cannot import the real tokens. Keep them in sync — and
-     never retune the brand here. Root font is 14px platform-wide, so 1rem
-     is 14px, not 16px. */
-  :root {{
-    color-scheme: light dark;
-    --brand: #0891b2;
-    --on-brand: #ffffff;
-    --ground: #f8fafc;
-    --card: #ffffff;
-    --text: #1e293b;
-    --text-soft: #64748b;
-    --border: rgba(8, 145, 178, 0.2);
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{
-      --brand: #00e0ff;
-      --on-brand: #0a0a19;
-      --ground: #0a0a19;
-      --card: #140f2d;
-      --text: rgba(255, 255, 255, 0.87);
-      --text-soft: rgba(255, 255, 255, 0.6);
-      --border: rgba(0, 224, 255, 0.2);
-    }}
-  }}
-  * {{ box-sizing: border-box; }}
-  html {{ font-size: 14px; }}
-  body {{
-    margin: 0; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; padding: 2rem;
-    background: var(--ground); color: var(--text);
-    font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }}
-  main {{
-    max-width: 30rem; width: 100%; text-align: center;
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 18px; padding: 3rem 2.5rem;
-  }}
-  .mark {{ margin: 0 auto 1.75rem; width: 11rem; }}
-  .mark svg {{ width: 100%; height: auto; display: block; }}
-  h1 {{ font-size: 1.6rem; font-weight: 600; margin: 0 0 .75rem; line-height: 1.3; }}
-  p {{ margin: 0 0 2rem; line-height: 1.7; font-size: 1rem; color: var(--text-soft); }}
-  a.cta {{
-    display: inline-block; padding: .85rem 2.25rem; border-radius: 12px;
-    text-decoration: none; font-size: 1rem; font-weight: 600;
-    background: var(--brand); color: var(--on-brand); border: 0;
-    transition: filter .15s ease;
-  }}
-  a.cta:hover {{ filter: brightness(1.08); }}
-  a.cta:focus-visible {{ outline: 2px solid var(--brand); outline-offset: 3px; }}
-  @media (prefers-reduced-motion: reduce) {{ a.cta {{ transition: none; }} }}
-</style>
-<main>
-  <div class="mark" role="img" aria-label="Orcaa">{logo}</div>
-  <h1>{title}</h1>
-  <p>{body}</p>
-  <a class="cta" href="{action}">{cta}</a>
-</main>
-</html>"##,
-        logo = ORCAA_LOGO_SVG,
-        lang = strings.html_lang(),
-        dir = if strings.is_rtl() { "rtl" } else { "ltr" },
-        title = title,
-        body = body,
-        cta = cta,
-        action = action_href,
-    )
-}
-
-#[cfg(test)]
-mod shell_page_tests {
-    use super::*;
-
-    #[test]
-    fn the_button_targets_the_shell_action_never_the_auth_host_directly() {
-        let strings = Strings::detect("Orcaa".to_string());
-
-        for waiting in [false, true] {
-            let html = holding_page_html(&strings, "https://auth.orcaa.cloud", waiting);
-
-            // Pressing the button is the ONLY thing that may open the browser.
-            // If this href pointed at the auth host, merely *landing* on the
-            // page — which is what a sign-out does — would hijack the browser.
-            assert!(html.contains(SHELL_ACTION_SIGNIN), "button must carry the action flag");
-            assert!(
-                !html.contains("href=\"https://auth."),
-                "the button must not link straight to the auth host"
-            );
-            assert!(html.contains("<h1>"));
-        }
-    }
-
-    #[test]
-    fn the_shell_page_is_never_stored_as_the_last_visited_url() {
-        // Storing it reopened the app on its own waiting screen instead of the
-        // welcome screen.
-        for raw in [
-            "http://orcaa-shell.localhost/",
-            "http://orcaa-shell.localhost/?waiting=1",
-            "orcaa-shell://localhost/",
-        ] {
-            let url: Url = raw.parse().unwrap();
-            assert!(is_shell_url(&url), "{raw} should be recognised as the shell");
-            assert!(!is_orcaa_host(&url), "{raw} must not be persisted");
-            // Still internal — it must never be handed to the system browser.
-            assert!(is_internal_url(&url));
-        }
-    }
-
-    #[test]
-    fn real_tenant_pages_are_still_persisted() {
-        let url: Url = "https://clinic.orcaa.cloud/dashboard".parse().unwrap();
-        assert!(is_orcaa_host(&url));
-        assert!(!is_auth_host(&url));
-    }
-}
+// ---------------------------------------------------------------------------
+// Sign-in
+// ---------------------------------------------------------------------------
 
 /// Hands sign-in to the system browser and switches the window to the waiting
-/// state. Driven by the user clicking the call to action — the browser is never
-/// opened behind their back on launch.
+/// state.
+///
+/// Reachable **only** through the `signin_start` command, which the welcome
+/// page fires from a click handler. It used to be triggered by navigating to a
+/// magic `?action=signin` URL that `on_navigation` watched for, which meant
+/// anything that produced that navigation opened the browser — including simply
+/// landing on the page after a sign-out or a cold launch.
 fn start_browser_sign_in(app: &AppHandle) {
     let Some(config) = app.try_state::<AppUrls>() else {
         return;
@@ -403,17 +274,14 @@ fn start_browser_sign_in(app: &AppHandle) {
         return;
     };
 
-    log::info!("handing sign-in to the system browser");
+    log::info!("handing sign-in to the system browser (user pressed the button)");
 
-    if let Err(err) = app
-        .opener()
-        .open_url(browser_url.to_string(), None::<&str>)
-    {
+    if let Err(err) = app.opener().open_url(browser_url.to_string(), None::<&str>) {
         log::error!("failed to open the browser for sign-in: {err}");
     }
 
-    if let Some(window) = app.get_webview_window("main") {
-        if let Err(err) = window.navigate(shell_url(true, true)) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        if let Err(err) = window.navigate(shell_url(&ShellPage::Waiting, true)) {
             log::error!("failed to show the waiting page: {err}");
         }
     }
@@ -437,7 +305,7 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
 
     log::info!("resuming sign-in on {}", resolved.url.host_str().unwrap_or("?"));
 
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         if let Err(err) = window.navigate(resolved.url) {
             log::error!("failed to resume sign-in: {err}");
         }
@@ -458,7 +326,7 @@ struct AppUrls {
     deep_link_scheme: String,
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
+pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
     if let Err(err) = app.notification().builder().title(title).body(body).show() {
         log::warn!("failed to show notification: {err}");
     }
@@ -471,13 +339,13 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 /// updater's pre-exit hook. That last one matters: on Windows the updater
 /// hands off to the NSIS installer and calls `process::exit(0)` itself, so no
 /// window event ever fires and anything not saved here is lost.
-fn persist_session(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+pub(crate) fn persist_session(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         if let Ok(url) = window.url() {
             // Only ever remember a real page the user was working on. Saving
-            // the shell's own sign-in scaffolding would reopen the app on its
-            // waiting screen instead of the welcome screen, and saving the auth
-            // host is pointless — the fallback already resolves there.
+            // the shell's own scaffolding would reopen the app on its waiting
+            // screen instead of the welcome screen, and saving the auth host is
+            // pointless — the fallback already resolves there.
             if is_orcaa_host(&url) && !is_sign_in_route(&url) {
                 if let Ok(store) = app.store(STORE_FILE) {
                     store.set(STORE_KEY_LAST_URL, json!(url.to_string()));
@@ -515,121 +383,162 @@ fn maybe_show_tray_hint(app: &AppHandle, strings: &Strings) {
     notify(app, &strings.tray_hint_title(), &strings.tray_hint_body());
 }
 
-/// Checks for, downloads and installs an update.
-///
-/// `interactive` distinguishes the tray's "Check for Updates…" (which owes the
-/// user an answer either way) from the silent startup check (which should stay
-/// quiet unless it actually has something to install).
-async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bool) {
-    let before_exit = app.clone();
-    let updater = app
-        .updater_builder()
-        .on_before_exit(move || persist_session(&before_exit))
-        .build();
+// ---------------------------------------------------------------------------
+// Zoom
+// ---------------------------------------------------------------------------
 
-    let updater = match updater {
-        Ok(updater) => updater,
-        Err(err) => {
-            log::error!("failed to build updater: {err}");
-            if interactive {
-                notify(
-                    &app,
-                    &strings.update_failed_title(),
-                    &strings.update_failed_body(),
-                );
-            }
-            return;
-        }
-    };
+fn saved_zoom(app: &AppHandle) -> f64 {
+    app.store(STORE_FILE)
+        .ok()
+        .and_then(|store| store.get(STORE_KEY_ZOOM))
+        .and_then(|value| value.as_f64())
+        // A corrupted store must not be able to render the app unusable.
+        .filter(|zoom| *zoom >= ZOOM_STEPS[0] && *zoom <= ZOOM_STEPS[ZOOM_STEPS.len() - 1])
+        .unwrap_or(1.0)
+}
 
-    match updater.check().await {
-        Ok(Some(update)) => {
-            log::info!(
-                "update available: {} -> {}",
-                update.current_version,
-                update.version
-            );
-
-            // Ask first. Swapping the binary and restarting under someone who is
-            // mid-task is not ours to decide — especially on a reception desk
-            // with a patient waiting.
-            let accepted = app
-                .dialog()
-                .message(strings.update_prompt_body(&update.current_version, &update.version))
-                .title(strings.update_prompt_title())
-                .buttons(MessageDialogButtons::OkCancelCustom(
-                    strings.update_install_now(),
-                    strings.update_remind_later(),
-                ))
-                .blocking_show();
-
-            if !accepted {
-                // Deliberately no re-prompt this session — the next launch asks
-                // again. Nagging is how people learn to dismiss on reflex.
-                log::info!("user postponed the update");
-                return;
-            }
-
-            notify(
-                &app,
-                &strings.update_downloading_title(),
-                &strings.update_downloading_body(),
-            );
-
-            match update.download_and_install(|_, _| {}, || {}).await {
-                Ok(()) => {
-                    // Windows never gets here: `install()` launches the NSIS
-                    // installer with /P /R and exits the process itself, and the
-                    // installer relaunches us. macOS and Linux swap the bundle
-                    // in place and need the restart spelled out.
-                    notify(
-                        &app,
-                        &strings.update_installing_title(),
-                        &strings.update_installing_body(),
-                    );
-                    persist_session(&app);
-                    app.restart();
-                }
-                Err(err) => {
-                    log::error!("failed to install update: {err}");
-                    if interactive {
-                        notify(
-                            &app,
-                            &strings.update_failed_title(),
-                            &strings.update_failed_body(),
-                        );
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            log::info!("no update available");
-            if interactive {
-                notify(
-                    &app,
-                    &strings.update_none_title(),
-                    &strings.update_none_body(),
-                );
-            }
-        }
-        Err(err) => {
-            log::error!("update check failed: {err}");
-            if interactive {
-                notify(
-                    &app,
-                    &strings.update_failed_title(),
-                    &strings.update_failed_body(),
-                );
-            }
-        }
+/// Re-applied after every page load: WebView2 resets the zoom factor on a
+/// top-level navigation, so setting it once at startup would last exactly until
+/// the user opened a different route.
+fn apply_saved_zoom(app: &AppHandle, window: &WebviewWindow) {
+    let zoom = saved_zoom(app);
+    if (zoom - 1.0).abs() > f64::EPSILON {
+        let _ = window.set_zoom(zoom);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn signin_start(app: AppHandle) {
+    start_browser_sign_in(&app);
+}
+
+#[tauri::command]
+fn shell_zoom(app: AppHandle, window: WebviewWindow, step: i32) {
+    let current = saved_zoom(&app);
+    let index = ZOOM_STEPS
+        .iter()
+        .position(|z| (z - current).abs() < 0.001)
+        .unwrap_or(ZOOM_DEFAULT_INDEX);
+
+    let next = if step == 0 {
+        ZOOM_DEFAULT_INDEX
+    } else {
+        (index as i32 + step).clamp(0, ZOOM_STEPS.len() as i32 - 1) as usize
+    };
+
+    let zoom = ZOOM_STEPS[next];
+    if let Err(err) = window.set_zoom(zoom) {
+        log::warn!("failed to set zoom: {err}");
+        return;
+    }
+
+    if let Ok(store) = app.store(STORE_FILE) {
+        store.set(STORE_KEY_ZOOM, json!(zoom));
+        let _ = store.save();
+    }
+}
+
+#[tauri::command]
+fn shell_reload(window: WebviewWindow) {
+    let _ = window.reload();
+}
+
+#[tauri::command]
+fn shell_fullscreen_toggle(window: WebviewWindow) {
+    let is_fullscreen = window.is_fullscreen().unwrap_or(false);
+    let _ = window.set_fullscreen(!is_fullscreen);
+}
+
+#[tauri::command]
+fn shell_quit(app: AppHandle) {
+    persist_session(&app);
+    app.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+/// Reports a finished download the way a desktop app should.
+///
+/// Every export in the app (xlsx, PDF, JSON) is a blob plus a synthetic
+/// `<a download>`, so WebView2 handles it with Edge's own download flyout and
+/// drops the file in Downloads. That works, but it is unmistakably a browser
+/// behaviour and it leaves the user hunting for the file. The download itself is
+/// left alone — only the ending is ours: a toast naming the file, with a button
+/// that opens the folder with it selected.
+fn on_download_event(app: &AppHandle, event: DownloadEvent<'_>) -> bool {
+    let DownloadEvent::Finished { path, success, .. } = event else {
+        // `Requested` — returning true lets WebView2 save where it normally
+        // would. Redirecting it would surprise anyone who has set a download
+        // folder in Edge.
+        return true;
+    };
+
+    let strings = app
+        .try_state::<Strings>()
+        .map(|s| (*s).clone())
+        .unwrap_or_else(|| Strings::detect("Orcaa".to_string()));
+
+    let Some(path) = path.filter(|_| success) else {
+        if !success {
+            log::warn!("a download failed");
+            notify(
+                app,
+                &strings.download_failed_title(),
+                &strings.update_failed_body(),
+            );
+        }
+        return true;
+    };
+
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+
+    log::info!("download finished: {}", path.display());
+    reveal_toast(app, &strings, &name, path);
+    true
+}
+
+#[cfg(windows)]
+fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, path: std::path::PathBuf) {
+    use tauri_winrt_notification::Toast;
+
+    let handle = app.clone();
+    let toast = Toast::new(&app.config().identifier)
+        .title(&strings.download_done_title())
+        .text1(name)
+        .add_button(&strings.download_reveal(), "reveal")
+        .on_activated(move |_| {
+            if let Err(err) = handle.opener().reveal_item_in_dir(&path) {
+                log::warn!("failed to reveal the download: {err}");
+            }
+            Ok(())
+        });
+
+    if toast.show().is_err() {
+        notify(app, &strings.download_done_title(), name);
+    }
+}
+
+#[cfg(not(windows))]
+fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, _path: std::path::PathBuf) {
+    notify(app, &strings.download_done_title(), name);
+}
+
+// ---------------------------------------------------------------------------
+
 pub fn run() {
     tauri::Builder::default()
-        // Serves the shell's own sign-in page. Everything it needs is derived
-        // from config here rather than read from managed state, so the page
-        // cannot depend on setup having run first.
+        // Serves the shell's own pages. Everything they need is derived from
+        // config or managed state here rather than carried in the URL, so a
+        // stale URL can never describe something that is no longer true.
         .register_uri_scheme_protocol(SHELL_SCHEME, |ctx, request| {
             let app = ctx.app_handle();
             let product = app
@@ -637,15 +546,26 @@ pub fn run() {
                 .product_name
                 .clone()
                 .unwrap_or_else(|| "Orcaa".into());
-            let identifier = app.config().identifier.clone();
+            let strings = Strings::detect(product);
 
-            let fallback: Url = fallback_url(&identifier)
-                .parse()
-                .expect("fallback URL must parse");
-            let auth_base = format!("https://auth.{}", base_domain_of(&fallback));
+            let page = ShellPage::from_query(request.uri().query().unwrap_or_default());
 
-            let waiting = request.uri().query().unwrap_or_default().contains("waiting");
-            let html = holding_page_html(&Strings::detect(product), &auth_base, waiting);
+            let html = match page {
+                ShellPage::Welcome => holding_page_html(&strings, false),
+                ShellPage::Waiting => holding_page_html(&strings, true),
+                ShellPage::Loading { ref target } => loading_page_html(&strings, target),
+                ShellPage::Update => match app.try_state::<PendingUpdate>().and_then(|s| s.get()) {
+                    Some(update) => update_page_html(
+                        &strings,
+                        &update.current_version,
+                        &update.version,
+                        update.body.as_deref(),
+                    ),
+                    // Reloading the window after the offer was withdrawn: show
+                    // the welcome page rather than an empty update prompt.
+                    None => holding_page_html(&strings, false),
+                },
+            };
 
             tauri::http::Response::builder()
                 .header(tauri::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -681,6 +601,24 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        // Opt-in, off until the user ticks the tray item. `--hidden` so a
+        // machine that boots straight into Orcaa lands in the tray rather than
+        // throwing a window in front of whoever is signing in.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
+        .invoke_handler(tauri::generate_handler![
+            signin_start,
+            shell_zoom,
+            shell_reload,
+            shell_fullscreen_toggle,
+            shell_quit,
+            notify::shell_notify,
+            updater::update_install,
+            updater::update_snooze,
+            updater::update_skip,
+        ])
         .setup(|app| {
             let identifier = app.config().identifier.clone();
             let product_name = app
@@ -719,73 +657,112 @@ pub fn run() {
                 },
             });
             app.manage(PendingSignIn::default());
+            app.manage(PendingUpdate::default());
             app.manage(strings.clone());
 
             // The saved URL is the page the user was last on, which may well be
-            // the auth app. Sign-in never renders in here, so start the browser
-            // flow instead and park on the holding page.
-            let needs_sign_in = is_sign_in_route(&initial_url);
-            let start_webview_url = if needs_sign_in {
-                tauri::WebviewUrl::CustomProtocol(shell_url(false, false))
+            // the auth app. Sign-in never renders in here, so park on the
+            // welcome page and wait for the user to ask.
+            //
+            // Otherwise start on the boot page, which shows instantly and hands
+            // off to the tenant once it has confirmed the host answers. The
+            // window used to be created hidden and revealed on first paint,
+            // which meant a slow or unreachable backend showed nothing at all.
+            let start_page = if is_sign_in_route(&initial_url) {
+                ShellPage::Welcome
             } else {
-                tauri::WebviewUrl::External(initial_url)
+                ShellPage::Loading {
+                    target: initial_url.to_string(),
+                }
             };
-
-            // Set before the window exists so a `single_instance` re-launch
-            // during boot doesn't race the first-paint reveal.
-            let shown = Arc::new(AtomicBool::new(false));
 
             let nav_handle = app.handle().clone();
             let load_handle = app.handle().clone();
-            let load_shown = shown.clone();
+            let load_product = product_name.clone();
 
-            tauri::WebviewWindowBuilder::new(app, "main", start_webview_url)
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                MAIN_WINDOW,
+                tauri::WebviewUrl::CustomProtocol(shell_url(&start_page, false)),
+            )
             .title(&product_name)
             .inner_size(1440.0, 900.0)
             .min_inner_size(1024.0, 640.0)
             .resizable(true)
-            .visible(false)
+            // Only affects a first launch — the window-state plugin overrides
+            // this whenever it has geometry to restore.
+            .center()
+            // Tauri's own drag-and-drop handler is on by default and swallows
+            // HTML5 file drops before the page ever sees them, which silently
+            // breaks every upload dropzone in the app. The shell listens for no
+            // drag events of its own, so there is nothing to lose.
+            .disable_drag_drop_handler()
+            // Chromium blocks audio that no user gesture asked for. The app
+            // plays a sound when a notification arrives and rings on an incoming
+            // call — precisely the moments when nobody has touched the window,
+            // and often when it is hidden in the tray. Without this the sound is
+            // dropped silently and the toast arrives in silence.
+            //
+            // Note this REPLACES wry's own defaults, so they are repeated here:
+            // dropping them would restore Edge's "mini menu" and run WebView2's
+            // SmartScreen over the app's own pages.
+            .additional_browser_args(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                 --autoplay-policy=no-user-gesture-required",
+            )
+            .initialization_script(shell_init_js())
+            .on_download(|webview, event| on_download_event(&webview.app_handle().clone(), event))
             .on_navigation(move |url| {
-                // One rule covers every route into sign-in: the initial load, a
-                // session expiring mid-use and bouncing to auth, and the retry
-                // link on the holding page.
-                // The button was pressed — this is the ONLY path that opens
-                // the browser.
-                if is_shell_url(url) && url.query().unwrap_or_default().contains("action=signin") {
-                    let handle = nav_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        start_browser_sign_in(&handle);
-                    });
-                    return false;
-                }
-
                 // Logging out, or a session expiring, lands here. Show the
                 // welcome page and stop — hijacking someone's browser the
                 // instant they sign out is hostile. They asked to leave.
                 if is_sign_in_route(url) {
                     let handle = nav_handle.clone();
                     tauri::async_runtime::spawn(async move {
-                        if let Some(window) = handle.get_webview_window("main") {
-                            let _ = window.navigate(shell_url(false, true));
+                        if let Some(window) = handle.get_webview_window(MAIN_WINDOW) {
+                            let _ = window.navigate(shell_url(&ShellPage::Welcome, true));
                         }
                     });
                     return false;
                 }
 
                 if is_internal_url(url) {
-                    true
-                } else {
+                    return true;
+                }
+
+                // Everything else is a link out of the app, which belongs in the
+                // user's browser — but only ever as the result of them clicking
+                // something. A redirect chain during boot must never be able to
+                // launch a browser on its own, so external URLs are refused
+                // until the app itself is on screen.
+                let ready = nav_handle
+                    .get_webview_window(MAIN_WINDOW)
+                    .and_then(|w| w.url().ok())
+                    .map(|current| is_orcaa_host(&current))
+                    .unwrap_or(false);
+
+                if ready {
+                    log::info!("opening {url} in the system browser");
                     let _ = nav_handle.opener().open_url(url.to_string(), None::<&str>);
-                    false
+                } else {
+                    log::warn!("refused to open {url} externally before the app had loaded");
                 }
+                false
             })
-            .on_page_load(move |_window, payload| {
-                if matches!(payload.event(), PageLoadEvent::Finished) {
-                    log::info!("page loaded: {}", payload.url());
-                    reveal_main_window(&load_handle, &load_shown);
+            .on_page_load(move |window, payload| {
+                if !matches!(payload.event(), PageLoadEvent::Finished) {
+                    return;
                 }
+
+                log::info!("page loaded: {}", payload.url());
+                apply_saved_zoom(&load_handle, &window);
+                set_window_title(&window, &load_product);
             })
             .build()?;
+
+            // Runs after the window-state plugin's `on_window_ready` hook, so
+            // this sees the geometry the user is actually about to get.
+            clamp_window_to_work_area(&window);
 
             // The browser hands the finished session back here.
             let deep_link_handle = app.handle().clone();
@@ -806,16 +783,6 @@ pub fn run() {
                 }
             }
 
-            // Safety net: a failed or endlessly-hanging load must still end up
-            // with a visible window the user can retry from (Ctrl+R), not an
-            // app that silently never appears.
-            let timeout_handle = app.handle().clone();
-            let timeout_shown = shown.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(FIRST_PAINT_TIMEOUT).await;
-                reveal_main_window(&timeout_handle, &timeout_shown);
-            });
-
             let show_item =
                 MenuItem::with_id(app, "show", strings.tray_open(), true, None::<&str>)?;
             let update_item = MenuItem::with_id(
@@ -825,6 +792,17 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            // The tray is the right home for this: the whole point of the
+            // setting is that the app is already sitting there when the machine
+            // comes up, and it needs no round trip through the web app.
+            let autostart_item = CheckMenuItem::with_id(
+                app,
+                "autostart",
+                strings.tray_autostart(),
+                true,
+                app.autolaunch().is_enabled().unwrap_or(false),
+                None::<&str>,
+            )?;
             let quit_item =
                 MenuItem::with_id(app, "quit", strings.tray_quit(), true, None::<&str>)?;
             let menu = Menu::with_items(
@@ -832,6 +810,7 @@ pub fn run() {
                 &[
                     &show_item,
                     &PredefinedMenuItem::separator(app)?,
+                    &autostart_item,
                     &update_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit_item,
@@ -845,11 +824,30 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "autostart" => {
+                        let manager = app.autolaunch();
+                        let enabled = manager.is_enabled().unwrap_or(false);
+                        let result = if enabled {
+                            manager.disable()
+                        } else {
+                            manager.enable()
+                        };
+
+                        match result {
+                            // The checkbox is re-synced from the real state
+                            // rather than toggled optimistically — a blocked
+                            // registry write must not leave the menu claiming
+                            // something that isn't true.
+                            Ok(()) => log::info!("autostart {}", if enabled { "disabled" } else { "enabled" }),
+                            Err(err) => log::error!("failed to change autostart: {err}"),
+                        }
+                        let _ = autostart_item.set_checked(manager.is_enabled().unwrap_or(false));
+                    }
                     "check_updates" => {
                         let handle = app.clone();
                         let strings = menu_strings.clone();
                         tauri::async_runtime::spawn(async move {
-                            check_for_updates(handle, strings, true).await;
+                            updater::check_for_updates(handle, strings, true).await;
                         });
                     }
                     "quit" => {
@@ -879,27 +877,176 @@ pub fn run() {
             let update_strings = strings.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(UPDATE_CHECK_DELAY).await;
-                check_for_updates(update_handle, update_strings, false).await;
+                updater::check_for_updates(update_handle, update_strings, false).await;
             });
 
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle();
-                persist_session(app);
+            // Scoped to the main window on purpose: the update window is a real
+            // window too, and closing it must close it — not hide the whole app
+            // to the tray.
+            if window.label() != MAIN_WINDOW {
+                return;
+            }
 
-                if let Some(strings) = app.try_state::<Strings>() {
-                    maybe_show_tray_hint(app, &strings);
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    let app = window.app_handle();
+                    persist_session(app);
+
+                    if let Some(strings) = app.try_state::<Strings>() {
+                        maybe_show_tray_hint(app, &strings);
+                    }
+
+                    // Hide to tray instead of quitting so the WebSocket stays
+                    // connected and OS toasts keep firing for incoming
+                    // notifications. True exit is via the tray menu's Quit item.
+                    let _ = window.hide();
+                    api.prevent_close();
                 }
-
-                // Hide to tray instead of quitting so the WebSocket stays
-                // connected and OS toasts keep firing for incoming
-                // notifications. True exit is via the tray menu's Quit item.
-                let _ = window.hide();
-                api.prevent_close();
+                // Fires when the window is dragged onto a monitor with a
+                // different scale factor, which is the other way geometry ends
+                // up off-screen.
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    if let Some(window) = window.app_handle().get_webview_window(MAIN_WINDOW) {
+                        clamp_window_to_work_area(&window);
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running orcaa desktop");
+}
+
+/// Names the window after the page it is showing, the way every other desktop
+/// app does. Falls back to the product name so the title is never empty or
+/// stuck on a stale route.
+fn set_window_title(window: &WebviewWindow, product: &str) {
+    let window = window.clone();
+    let product = product.to_string();
+
+    let _ = window.clone().eval_with_callback(
+        "document.title",
+        move |value: String| {
+            let page = value.trim().trim_matches('"').trim();
+            let title = if page.is_empty() || page.eq_ignore_ascii_case(&product) {
+                product.clone()
+            } else {
+                format!("{page} — {product}")
+            };
+            let _ = window.set_title(&title);
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_above_the_top_of_the_screen_is_pulled_back_down() {
+        // The reported bug: the title bar sliced in half by the top edge.
+        let area = (0, 0, 1920, 1040);
+        let (x, y, w, h) = clamped_rect((300, -18, 1440, 900), area);
+
+        assert_eq!((x, y), (300, 0), "the window must start at the work area top");
+        assert_eq!((w, h), (1440, 900), "a window that already fits must not be resized");
+    }
+
+    #[test]
+    fn a_window_already_inside_the_work_area_is_left_alone() {
+        let area = (0, 0, 1920, 1040);
+        let rect = (120, 60, 1440, 900);
+
+        assert_eq!(clamped_rect(rect, area), rect);
+    }
+
+    #[test]
+    fn a_window_larger_than_the_work_area_is_shrunk_to_fit() {
+        // 1440x900 is bigger than the 1366x768 panels a lot of reception desks
+        // run, once the taskbar is taken off.
+        let area = (0, 0, 1366, 728);
+        let (x, y, w, h) = clamped_rect((0, 0, 1440, 900), area);
+
+        assert_eq!((w, h), (1366, 728));
+        assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn a_window_off_the_far_edges_is_pulled_fully_into_view() {
+        let area = (0, 0, 1920, 1040);
+        let (x, y, w, h) = clamped_rect((1900, 1030, 1440, 900), area);
+
+        assert_eq!((x, y), (1920 - 1440, 1040 - 900));
+        assert_eq!((w, h), (1440, 900));
+    }
+
+    #[test]
+    fn a_secondary_monitor_at_a_negative_offset_is_respected() {
+        // A monitor to the left of the primary has a negative origin; clamping
+        // against 0 would teleport the window to the wrong screen.
+        let area = (-1920, -200, 1920, 1040);
+        let (x, y, _, _) = clamped_rect((-2100, -400, 1280, 800), area);
+
+        assert_eq!((x, y), (-1920, -200));
+    }
+
+    #[test]
+    fn the_taskbar_strip_is_respected() {
+        // Work area, not monitor bounds: a window pinned to y=0 of a monitor
+        // whose work area starts at y=40 (top-docked taskbar) must move down.
+        let area = (0, 40, 1920, 1000);
+        let (_, y, _, _) = clamped_rect((0, 0, 1200, 800), area);
+
+        assert_eq!(y, 40);
+    }
+
+    #[test]
+    fn the_shell_pages_are_never_stored_as_the_last_visited_url() {
+        // Storing one reopened the app on its own scaffolding instead of the
+        // page the user was actually working on.
+        for raw in [
+            "http://orcaa-shell.localhost/",
+            "http://orcaa-shell.localhost/?waiting=1",
+            "http://orcaa-shell.localhost/?update=1",
+            "http://orcaa-shell.localhost/?loading=https%3A%2F%2Fclinic.orcaa.cloud%2F",
+            "orcaa-shell://localhost/",
+        ] {
+            let url: Url = raw.parse().unwrap();
+            assert!(is_shell_url(&url), "{raw} should be recognised as the shell");
+            assert!(!is_orcaa_host(&url), "{raw} must not be persisted");
+            // Still internal — it must never be handed to the system browser.
+            assert!(is_internal_url(&url));
+        }
+    }
+
+    #[test]
+    fn real_tenant_pages_are_still_persisted() {
+        let url: Url = "https://clinic.orcaa.cloud/dashboard".parse().unwrap();
+        assert!(is_orcaa_host(&url));
+        assert!(!is_auth_host(&url));
+    }
+
+    #[test]
+    fn sign_in_routes_are_bounced_but_handoffs_are_not() {
+        let bounced = [
+            "https://auth.orcaa.cloud/login",
+            "https://clinic.orcaa.cloud/login",
+            "https://clinic.orcaa.cloud/reset-password?token=x",
+        ];
+        for raw in bounced {
+            assert!(is_sign_in_route(&raw.parse().unwrap()), "{raw} should bounce");
+        }
+
+        let allowed = [
+            "https://clinic.orcaa.cloud/desktop-handoff?token=x",
+            "https://admin.orcaa.cloud/admin-handoff?token=x",
+            "https://clinic.orcaa.cloud/dashboard",
+        ];
+        for raw in allowed {
+            assert!(!is_sign_in_route(&raw.parse().unwrap()), "{raw} should load");
+        }
+    }
 }

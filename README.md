@@ -103,6 +103,17 @@ attacker. Two independent things defend it:
 The returned `subdomain` is validated as a single DNS label before it is used to build a URL — otherwise a
 crafted value could steer the webview off the tenant domain.
 
+**The browser only ever opens on a click.** The welcome page's button fires the `signin_start` command from
+a `click` handler — it is not a link, and there is no anchor anywhere on the page. This used to be an
+`?action=signin` URL that `on_navigation` watched for, which meant *any* navigation producing that URL
+opened a browser window; landing on the page after a sign-out or a cold launch could hijack the browser
+with nobody having pressed anything. An `invoke` cannot be reached by navigation, so the class of bug is
+gone rather than patched.
+
+For the same reason, the "hand this off to the system browser" rule for external links is refused until the
+app itself is on screen (i.e. the webview is sitting on an orcaa host). A redirect chain during boot must
+never be able to launch a browser on its own; suppressed attempts are logged with the URL.
+
 Where the parts live:
 
 | Piece                                           | Location                                                           |
@@ -121,29 +132,51 @@ window instead of resuming sign-in.
 The **admin** desktop build is unchanged: it points at `admin.orcaa.cloud`, whose two-step email-code login
 never goes through the auth app, so there is nothing to hand off.
 
-**The `orcaa://` scheme is registered by the business build only** — it lives in
-`tauri.business.conf.json`, not the shared base config. Both builds registering the same scheme would be a
-collision: Windows hands a scheme to whichever installer ran last, so on a machine with both apps installed
-a callback could be delivered to the admin app, which has no pending sign-in and would silently drop it —
-leaving the business app waiting on the holding page forever. If admin ever needs its own deep link, give it
-a distinct scheme rather than sharing this one.
+**Each build registers its own scheme** — `orcaa` in `tauri.business.conf.json`, `orcaa-admin` in
+`tauri.admin.conf.json`, never in the shared base config. Both builds registering the *same* scheme would be
+a collision: Windows hands a scheme to whichever installer ran last, so on a machine with both apps
+installed a callback could be delivered to the wrong app, which has no pending sign-in and would silently
+drop it — leaving the other one waiting on the holding page forever. Keep any future build on a distinct
+scheme rather than sharing one.
 
 ---
 
 ## What the Rust shell actually does
 
-Everything below lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs). Keyboard shortcuts are deliberately **not** implemented — WebView2 ships browser accelerator keys enabled by default, so <kbd>Ctrl</kbd>+<kbd>R</kbd> (reload), <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> (print), <kbd>Ctrl</kbd>+<kbd>F</kbd> and <kbd>Ctrl</kbd>+<kbd>±</kbd>/<kbd>0</kbd> (zoom) already work. A menu bar duplicating them would be clutter.
+Wiring lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs); the pages the shell draws itself are in
+[`src-tauri/src/shell_page.rs`](src-tauri/src/shell_page.rs) and the update flow is in
+[`src-tauri/src/updater.rs`](src-tauri/src/updater.rs).
 
 | Concern                | Behaviour                                                                                                                                                                                                                                                               |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **First paint**        | The window is created hidden and revealed on the first `PageLoadEvent::Finished`, so users never see WebView2's blank white canvas while the PWA boots. A 12 s timeout reveals it anyway — a dead network must not leave a tray icon and no window.                     |
-| **Reveal guard**       | `on_page_load` fires on _every_ navigation, so the reveal is behind an `AtomicBool`. Without it an in-app route change would yank the window back out of the tray.                                                                                                      |
+| **Launch**             | The window is visible from the first frame, showing a branded boot page served from `orcaa-shell://`. That page probes the tenant host and hands off to it. It replaces a hidden-until-first-paint window with a 12 s timeout, which showed nothing at all — sometimes for the whole twelve seconds — on a slow or dead network. |
+| **Offline**            | When the probe fails the same document becomes a **"Can't reach Orcaa — Retry"** surface, so an unreachable backend never falls through to WebView2's own error page. It re-probes automatically on the browser `online` event.                                          |
 | **Window geometry**    | Size / position / maximized / fullscreen restore across launches (`tauri-plugin-window-state`). Visibility is deliberately excluded from the flags — restoring "hidden" would make a launch appear to do nothing.                                                       |
-| **Small screens**      | On reveal the window is clamped to the monitor's _work area_ and re-centred if it had to shrink. Catches both the 1440×900 default on a 1366×768 panel and geometry restored from a larger external display.                                                            |
+| **Staying on screen**  | `clamp_window_to_work_area` pulls the window fully inside the _work area_ of whichever monitor its centre sits on, after restore and again on `ScaleFactorChanged`. **This is load-bearing:** the window-state plugin restores a saved position whenever the saved rect merely _intersects_ a monitor, so a window dragged until its title bar sat above the top edge came back exactly like that — caption buttons sliced in half, no title bar left to grab. |
 | **Session continuity** | The current URL + geometry are saved on every exit path — close button, tray Quit, and the updater's pre-exit hook.                                                                                                                                                     |
-| **External links**     | Any navigation off `*.orcaa.cloud` / `*.orcaa.test` is handed to the system browser instead of loading in-app.                                                                                                                                                          |
-| **Native strings**     | Tray, update toasts and the tray hint are localized EN/AR from the OS display language ([`src-tauri/src/i18n.rs`](src-tauri/src/i18n.rs)). The tray is drawn before any page loads, so the webview's locale isn't available yet — the OS is the only signal that early. |
+| **External links**     | Any navigation off `*.orcaa.cloud` / `*.orcaa.test` is handed to the system browser — but only once the app itself is on screen, so a boot-time redirect can't open a browser on its own.                                                                               |
+| **Keyboard**           | <kbd>Ctrl</kbd>+<kbd>±</kbd>/<kbd>0</kbd> and <kbd>Ctrl</kbd>+wheel zoom (**persisted** across launches and re-applied after every navigation, since WebView2 resets the zoom factor on a top-level load), <kbd>Ctrl</kbd>+<kbd>R</kbd>/<kbd>F5</kbd> refresh — which asks the app first via a cancelable `orcaa:refresh` event (`useDesktopRefreshBridge` re-pulls active queries, matching the app's "never reload, re-pull data" rule) and only reloads the webview if nothing cancels it; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> always hard-reloads. <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> history (not mirrored for Arabic — Windows doesn't), <kbd>F11</kbd> fullscreen, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit. Bound by an injection script that claims **only** modified keys — the app owns bare keys, including its own <kbd>/</kbd> search. |
+| **Context menu**       | **The app owns this** — `useGlobalContextMenu` already draws its own right-click menu and deliberately leaves the native one on editable fields for paste/spellcheck. The injected script must NOT bind `contextmenu`: it is injected at document-start, so calling `preventDefault()` makes the app's own handler see `defaultPrevented` and bail, leaving the page with **no** menu. The shell's own pages suppress it locally instead. Guarded by a test. |
+| **Notifications**      | Toasts are drawn by the shell (`shell_notify`), not the notification plugin, so clicking one **raises the window and navigates** to the page it was about. An incoming voice call is drawn as `Scenario::IncomingCall` — pre-expanded, persistent, looping the system ringtone, with Answer / Decline. The `url` is validated against the app's hosts in Rust before anything is navigated. |
+| **Audio**              | `--autoplay-policy=no-user-gesture-required`. Chromium drops audio no user gesture asked for, which is exactly the case for a notification sound arriving while the app sits in the tray — the toast would land in silence. Note this arg **replaces** wry's defaults, so they are repeated alongside it. |
+| **Downloads**          | The download itself is left to WebView2; only the ending is ours — a toast naming the file, with a **Show in folder** button (`opener().reveal_item_in_dir`). Every export in the app is a blob plus a synthetic `<a download>`, so without this the user is left hunting in Downloads behind Edge's flyout. |
+| **Start with Windows** | Opt-in, off by default, toggled from the tray (`tauri-plugin-autostart`, launched `--hidden` so a boot lands in the tray rather than throwing a window at whoever is signing in). The checkbox re-reads the real state after every toggle — a blocked registry write must not leave the menu claiming something untrue. |
+| **File drag-and-drop** | `disable_drag_drop_handler()` — Tauri's handler is on by default and swallows HTML5 file drops before the page sees them, which silently broke every upload dropzone in the app. The shell listens for no drag events of its own.                                        |
+| **Window title**       | Tracks the loaded page's `document.title`, falling back to the product name.                                                                                                                                                                                            |
+| **Native strings**     | Tray, boot/offline pages, the update window and the tray hint are localized EN/AR from the OS display language ([`src-tauri/src/i18n.rs`](src-tauri/src/i18n.rs)). The tray is drawn before any page loads, so the webview's locale isn't available yet — the OS is the only signal that early. |
 | **Diagnostics**        | Startup, update checks and failures are logged to the OS log dir via `tauri-plugin-log`.                                                                                                                                                                                |
+
+### Commands and the app ACL
+
+The crate exposes nine `#[tauri::command]`s (`signin_start`, `shell_zoom`, `shell_reload`,
+`shell_fullscreen_toggle`, `shell_quit`, `shell_notify`, `update_install`, `update_snooze`,
+`update_skip`).
+
+⚠️ **`src-tauri/permissions/shell.toml` existing is what declares an app ACL manifest.** Tauri gates IPC
+from a remote origin always, but from *local* pages only once that manifest exists. So the moment one
+command is listed there, **every** command must be — including the ones the update window calls from a page
+the shell itself served. A missing entry is a silent runtime rejection at the moment the button is pressed,
+not a build error.
 
 ---
 
@@ -159,14 +192,20 @@ Push-when-truly-quit (after user picks Quit in tray) is a v2 concern — require
 
 ### ⚠️ The remote-origin capability (read before touching `capabilities/`)
 
-This wrapper never loads a local page — the webview always sits on an `https://*.orcaa.cloud`
-origin. **Tauri rejects every IPC call from a remote origin** unless a capability lists that origin
-under `remote.urls`; `windows: ["main"]` alone only covers the _local_ context. That grant lives in
-[`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json).
+Once signed in, the webview sits on an `https://*.orcaa.cloud` origin. **Tauri rejects every IPC call from
+a remote origin** unless a capability lists that origin under `remote.urls`; `windows: ["main"]` alone only
+covers the _local_ context. That grant lives in
+[`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json), and it carries exactly two
+things: `notification:default` and `allow-shell-controls` (zoom / reload / fullscreen / quit, which the
+injected keyboard script calls from the tenant page).
 
 Delete or narrow it and `plugin:notification|notify` gets denied — the PWA's `sendNativeNotification()`
 catches the rejection and returns `false`, so **the app looks completely healthy while no toast ever
-fires**. `default.json` stays `local`-only on purpose: the remote page gets notifications and nothing else.
+fires**. The keyboard shortcuts fail the same silent way.
+
+`default.json` stays `local`-only on purpose and covers the shell's own pages in the `main` and `updater`
+windows. It is where `core:window:allow-start-dragging` lives — **not** part of `core:default`, and without
+it the frameless update window's `data-tauri-drag-region` header cannot be dragged.
 
 Note `https://*.orcaa.cloud` does **not** match the apex `https://orcaa.cloud` — that URL is listed
 separately (URLPattern semantics).
@@ -382,11 +421,36 @@ Set in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json):
 
 GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent release's assets. Admin releases are marked `prerelease`, so `/latest/` always resolves to a business release.
 
-**Registering the plugin is not enough — Tauri 2 never checks on its own.** The check is driven from [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs):
+**Registering the plugin is not enough — Tauri 2 never checks on its own.** The check is driven from [`src-tauri/src/updater.rs`](src-tauri/src/updater.rs):
 
-- **On launch**, 20 s after startup (window painted, WebSocket up), a silent check runs. If an update exists the user gets a localized "Update available" toast, it downloads in the background, and the installer takes over.
-- **On demand**, via the tray's **Check for Updates…**, which also reports "you're up to date" / "couldn't check" so the click is never a no-op.
+- **On launch**, 20 s after startup (window painted, WebSocket up), a silent check runs. It honours snooze and skip (below).
+- **On demand**, via the tray's **Check for Updates…**, which ignores snooze and skip — the user just asked — and reports "you're up to date" / "couldn't check" so the click is never a no-op.
 - **Before exit**, an `on_before_exit` hook persists the current URL and window geometry. This matters on Windows: `install()` hands off to the NSIS installer and calls `process::exit(0)` itself, so no window event ever fires and unsaved state would be lost.
+
+### The update window
+
+The prompt is a **window the shell draws itself** (`update_page_html`), not a native message box. It is
+frameless, parented to the main window, `skip_taskbar(true)`, and positioned over the centre of the app —
+clamped through the same work-area helper the main window uses, so an app near a screen edge can't push it
+off one. It shows the version pair, the release notes from the manifest (HTML-escaped), a live progress bar,
+and three choices:
+
+| Choice                | Effect                                                                                        |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| **Install now**       | Downloads and installs. The footer is retired rather than greyed out — once bytes are moving, waiting is the only honest option. |
+| **Remind me later**   | Writes `update_snoozed_until` (now + 24 h) to the store. Also what the ✕ and <kbd>Esc</kbd> do. |
+| **Skip this version** | Writes `update_skipped_version`. Suppresses that version only; the next one still prompts.       |
+
+It replaced a native `MessageDialogButtons::OkCancelCustom` box that was unbranded and blocking, took its
+own taskbar entry (so it read as a second application rather than part of this one), showed no progress, and
+— because Win32 falls back to a plain `MessageBox` when it can't raise a TaskDialog — routinely rendered
+"Remind me later" as a bare `Cancel`. That dialog survives **only** as a fallback for the case where the
+window cannot be created at all: losing the ability to offer an update would be worse than an ugly prompt.
+
+Download progress is pushed into the page with `WebviewWindow::eval` rather than emitted as an event —
+`eval` needs no permission, whereas events would drag `core:event` onto a window that otherwise needs almost
+nothing. Progress is throttled to whole percent; a fast connection delivers thousands of chunks and one
+`eval` each would starve the webview it is trying to animate.
 
 Windows uses NSIS `passive` mode (`/P /R`) — a progress bar, then the installer relaunches the app. macOS and Linux swap the bundle in place and are restarted explicitly via `app.restart()`.
 
@@ -397,7 +461,7 @@ Windows uses NSIS `passive` mode (`/P /R`) — a progress bar, then the installe
 | Data                                                                    | Location (Windows)                                                            |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | Cookies, localStorage, IndexedDB, service worker cache (the PWA itself) | `%LOCALAPPDATA%\<identifier>\EBWebView\` (WebView2 user data)                 |
-| Last URL, tray-hint-seen flag                                           | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin)              |
+| Last URL, tray-hint-seen flag, zoom level, update snooze / skipped version | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin)           |
 | Window size / position / maximized                                      | `%APPDATA%\<identifier>\.window-state.json` (window-state plugin)             |
 | Shell logs (startup, update checks, failures)                           | `%LOCALAPPDATA%\<identifier>\logs\` — ask users for this file when diagnosing |
 | App install (NSIS)                                                      | `%LOCALAPPDATA%\Programs\Orcaa\`                                              |
@@ -428,8 +492,7 @@ The GitHub Actions workflow uploads stable-name copies of the versioned installe
 - **Code signing (Windows)** — Sectigo OV cert (~$200/yr) or DigiCert EV cert (~$400/yr). Removes SmartScreen warnings.
 - **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Secrets-only setup, already wired in the workflow (see "Apple signing + notarization" above). Removes Gatekeeper warnings.
 - **Native deep-link auth** (`orcaa://`) — register a custom URL scheme so the auth subdomain can hand control back to a running desktop app after a system-browser SSO. Required if Orcaa moves to social-only login (Google/Microsoft).
-- **Notification click → focus + navigate** — Tauri notifications can carry an `actionTypeId`; wire a handler that raises the window and routes to the relevant page.
+- **Camera / microphone permission** — `wry` registers a WebView2 `PermissionRequested` handler **only** when clipboard access is enabled, and even then only auto-allows clipboard-read (`wry/src/webview2/mod.rs:500`); there is no public API for the rest. Mic and camera therefore fall through to WebView2's own prompt, which Chromium persists per origin — so it should ask once and then remember. **Unverified in a real build**: if voice calls or the QR scanner turn out to re-prompt or fail, the options are `--use-fake-ui-for-media-stream` (auto-grants for *every* origin in the webview — not acceptable) or an upstream `wry` change.
 - **Custom user agent** — deliberately _not_ set. `user_agent()` replaces the UA string wholesale, and the tenant subdomains sit behind Cloudflare, where a non-standard UA risks bot challenges. The PWA already identifies the shell via `__TAURI_INTERNALS__`; if the backend needs to know, send a header instead.
 - **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push.
-- **Chat / voice-call OS toasts** — currently only the main `.Notification` broadcast fires OS toasts; chat messages and voice calls fire `chat-message` / `voice-call-incoming` custom events. Hook the bridge into those handlers in the PWA's `WebSocketContext.tsx`.
-- **Notification click → focus app + navigate** — Tauri notifications can carry an `actionTypeId`. Wire a click handler that brings the window to front and navigates to the relevant URL.
+- **Push when truly quit** (see above) is the remaining notification gap — chat, voice calls and click-to-navigate are all wired now.

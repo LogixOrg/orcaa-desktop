@@ -1,0 +1,65 @@
+# Permissions for the shell's own commands.
+#
+# Tauri gates every IPC call from a remote origin, always. It only gates calls
+# from *local* pages once the app declares an ACL manifest — and the mere
+# existence of this file is that declaration. So once one command is listed here,
+# ALL of them must be, including the ones the update window calls from a page the
+# shell itself served. A missing entry is a silent runtime rejection, not a build
+# error.
+#
+# Referenced from `capabilities/default.json` (local pages) and
+# `capabilities/remote.json` (the hosted PWA). App permissions carry no plugin
+# prefix, which is how they are told apart from `core:` and plugin permissions.
+
+[[permission]]
+identifier = "allow-shell-signin"
+description = """
+Lets the shell's own welcome page hand sign-in to the system browser.
+
+Deliberately a command rather than a link the shell intercepts: an invoke can
+only come from the page's click handler, so merely *landing* on the welcome
+page — which is what a sign-out, an expired session and a cold launch all do —
+can no longer open a browser window on its own.
+"""
+commands.allow = ["signin_start"]
+
+[[permission]]
+identifier = "allow-shell-controls"
+description = """
+Desktop keyboard affordances for the hosted app: zoom in/out/reset, reload,
+fullscreen and quit.
+
+Granted to the remote origin because the script that binds these keys is injected
+into the tenant page. Zoom in particular has to round-trip through Rust so the
+level can be remembered between launches.
+"""
+commands.allow = [
+  "shell_zoom",
+  "shell_reload",
+  "shell_fullscreen_toggle",
+  "shell_quit",
+]
+
+[[permission]]
+identifier = "allow-shell-notify"
+description = """
+Native toasts that can be clicked.
+
+Replaces `plugin:notification|notify` for the hosted app. The plugin's desktop
+path drops the notification handle, so its toasts can never be clicked; this one
+raises the window and navigates to the page the notification is about, and can
+draw an incoming call as a ringing, persistent toast with Answer / Decline.
+
+The `url` it carries is validated against the orcaa hosts on the Rust side
+before anything is navigated — this command is reachable from the remote page.
+"""
+commands.allow = ["shell_notify"]
+
+[[permission]]
+identifier = "allow-updater-window"
+description = """
+The three choices the update window offers: install now, remind me later, and
+skip this version. Local only — the hosted app has no business installing
+binaries.
+"""
+commands.allow = ["update_install", "update_snooze", "update_skip"]

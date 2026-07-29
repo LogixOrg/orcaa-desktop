@@ -80,6 +80,22 @@ jobs:
             fi
           done
 
+          # The other three the checklist demands. Checking only the two overlay
+          # configs let package.json drift five patch versions behind unnoticed:
+          # nothing consumes it at build time, so nothing ever complained.
+          BASE_VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          PKG_VERSION=$(jq -r '.version' package.json)
+          CARGO_VERSION=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+
+          for pair in "tauri.conf.json:$BASE_VERSION" "package.json:$PKG_VERSION" "Cargo.toml:$CARGO_VERSION"; do
+            file="${pair%%:*}"
+            found="${pair#*:}"
+            if [[ "$found" != "$VERSION" ]]; then
+              echo "::error::$file says $found but tauri.business.conf.json says $VERSION. All five version fields must match."
+              exit 1
+            fi
+          done
+
           # THE guard. The tag does not set the version; the config does. Tagging
           # v1.0.5 over a config still reading 1.0.10 publishes a release whose
           # manifest advertises 1.0.10 — every client compares that against its own

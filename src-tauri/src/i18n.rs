@@ -142,6 +142,86 @@ impl Strings {
         self.pick("Open sign-in again", "افتح تسجيل الدخول مرة أخرى")
     }
 
+    // ---- Boot page (shown from the first frame, before any network) ----
+
+    pub fn loading_title(&self) -> String {
+        match self.lang {
+            Lang::En => format!("Starting {}", self.product),
+            Lang::Ar => format!("جارٍ تشغيل {}", self.product),
+        }
+    }
+
+    pub fn loading_body(&self) -> String {
+        self.pick(
+            "One moment while we connect you.",
+            "لحظة من فضلك، جارٍ الاتصال.",
+        )
+    }
+
+    // ---- Offline / unreachable backend --------------------------------
+
+    pub fn offline_title(&self) -> String {
+        match self.lang {
+            Lang::En => format!("Can't reach {}", self.product),
+            Lang::Ar => format!("تعذّر الوصول إلى {}", self.product),
+        }
+    }
+
+    pub fn offline_body(&self) -> String {
+        self.pick(
+            "Check your internet connection and try again. Everything you were working on is still here.",
+            "تحقّق من اتصالك بالإنترنت وحاول مرة أخرى. كل ما كنت تعمل عليه لا يزال موجودًا.",
+        )
+    }
+
+    pub fn offline_retry(&self) -> String {
+        self.pick("Try again", "إعادة المحاولة")
+    }
+
+    // ---- Incoming-call toast buttons ----------------------------------
+
+    pub fn call_answer(&self) -> String {
+        self.pick("Answer", "الرد")
+    }
+
+    pub fn call_decline(&self) -> String {
+        self.pick("Decline", "رفض")
+    }
+
+    // ---- Downloads ----------------------------------------------------
+
+    pub fn download_done_title(&self) -> String {
+        self.pick("Download complete", "اكتمل التنزيل")
+    }
+
+    pub fn download_reveal(&self) -> String {
+        self.pick("Show in folder", "إظهار في المجلد")
+    }
+
+    pub fn download_failed_title(&self) -> String {
+        self.pick("Download failed", "فشل التنزيل")
+    }
+
+    // ---- Tray: start with the system ----------------------------------
+
+    /// Named the way each platform names it in its own settings, so the item
+    /// reads like something the OS offers rather than something we invented.
+    pub fn tray_autostart(&self) -> String {
+        match self.lang {
+            Lang::En => {
+                if cfg!(target_os = "macos") {
+                    "Open at Login"
+                } else if cfg!(windows) {
+                    "Start with Windows"
+                } else {
+                    "Start on login"
+                }
+                .to_string()
+            }
+            Lang::Ar => "التشغيل عند بدء النظام".to_string(),
+        }
+    }
+
     // ---- Updater ------------------------------------------------------
 
     // ---- Update prompt (asks before installing) -----------------------
@@ -173,6 +253,41 @@ impl Strings {
 
     pub fn update_remind_later(&self) -> String {
         self.pick("Remind me later", "ذكّرني لاحقاً")
+    }
+
+    pub fn update_skip_version(&self) -> String {
+        self.pick("Skip this version", "تخطّي هذا الإصدار")
+    }
+
+    pub fn update_notes_heading(&self) -> String {
+        self.pick("What's new", "ما الجديد")
+    }
+
+    /// Shown when the release manifest carries no notes. Saying nothing at all
+    /// would leave a labelled but empty panel, which reads as broken.
+    pub fn update_notes_fallback(&self) -> String {
+        self.pick(
+            "Improvements and fixes across the app.",
+            "تحسينات وإصلاحات في مختلف أنحاء التطبيق.",
+        )
+    }
+
+    pub fn update_progress_downloading(&self) -> String {
+        self.pick("Downloading the update…", "جارٍ تنزيل التحديث…")
+    }
+
+    pub fn update_progress_installing(&self) -> String {
+        match self.lang {
+            Lang::En => format!("Installing. {} will restart in a moment.", self.product),
+            Lang::Ar => format!("جارٍ التثبيت. سيُعاد تشغيل {} بعد لحظات.", self.product),
+        }
+    }
+
+    pub fn update_download_failed(&self) -> String {
+        self.pick(
+            "The update couldn't be downloaded. Check your internet connection and try again.",
+            "تعذّر تنزيل التحديث. تحقّق من اتصالك بالإنترنت وحاول مرة أخرى.",
+        )
     }
 
     pub fn update_downloading_title(&self) -> String {

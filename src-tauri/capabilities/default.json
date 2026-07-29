@@ -1,13 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for the Orcaa desktop wrapper",
-  "windows": ["main"],
+  "description": "Default permissions for the Orcaa desktop wrapper. Local pages only (the shell's welcome, boot and update pages) — the hosted PWA is a remote origin and is covered by `remote.json` instead.",
+  "windows": ["main", "updater"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "updater:default",
     "opener:default",
     "notification:default",
-    "store:default"
+    "store:default",
+    "allow-shell-signin",
+    "allow-shell-controls",
+    "allow-updater-window"
   ]
 }

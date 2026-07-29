@@ -14,5 +14,9 @@
     ]
   },
   "windows": ["main"],
-  "permissions": ["notification:default"]
+  "permissions": [
+    "notification:default",
+    "allow-shell-controls",
+    "allow-shell-notify"
+  ]
 }
