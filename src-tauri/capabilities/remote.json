@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-webview",
-  "description": "Grants the remotely-hosted Orcaa PWA access to the native notification commands. The wrapper never loads a local page — the webview always sits on an https://*.orcaa.cloud origin — and Tauri denies EVERY IPC call coming from a remote origin unless that origin is listed in a capability's `remote.urls`. Without this file `plugin:notification|notify` is rejected and OS toasts silently never fire. Kept separate from `default.json` (which stays local-only) so the remote page gets notifications and nothing else.",
+  "description": "Grants the remotely-hosted Orcaa PWA access to a minimal set of native commands. The wrapper never loads a local page — the webview always sits on an https://*.orcaa.cloud origin — and Tauri denies EVERY IPC call coming from a remote origin unless that origin is listed in a capability's `remote.urls`. Without this file `plugin:notification|notify` is rejected and OS toasts silently never fire. Kept separate from `default.json` (which stays local-only). Beyond notifications, it grants ONLY `opener:allow-open-url` (URL scheme-scoped below — deliberately NOT `open_path` or `reveal_item_in_dir`, so the hosted page can never open a local file/executable). The opener plugin injects a shim that routes `window.open`/`target=\"_blank\"` through `plugin:opener|open_url`; without this grant every external link (About Orcaa, Get apps, WhatsApp, meeting links…) died with `Command plugin:opener|open_url not allowed by ACL` and never reached the browser.",
   "local": false,
   "remote": {
     "urls": [
@@ -17,6 +17,15 @@
   "permissions": [
     "notification:default",
     "allow-shell-controls",
-    "allow-shell-notify"
+    "allow-shell-notify",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" },
+        { "url": "mailto:*" },
+        { "url": "tel:*" }
+      ]
+    }
   ]
 }
