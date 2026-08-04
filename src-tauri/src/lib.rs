@@ -780,8 +780,11 @@ pub fn run() {
             )?;
 
             let menu_strings = strings.clone();
+            // Product name only — no version. The hover tooltip is a brand
+            // surface, not a diagnostic one; the version lives in the startup
+            // log and the update prompt.
             let mut tray_builder = TrayIconBuilder::with_id("main")
-                .tooltip(format!("{product_name} {version}"))
+                .tooltip(&product_name)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {

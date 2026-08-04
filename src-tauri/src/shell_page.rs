@@ -788,7 +788,7 @@ mod tests {
         let html = update_page_html(
             &strings(),
             "1.0.0",
-            "1.1.5",
+            "1.1.6",
             Some("<img src=x onerror=alert(1)>\n</script><b>hi</b>"),
         );
 
@@ -808,13 +808,13 @@ mod tests {
 
     #[test]
     fn the_update_page_offers_all_three_choices() {
-        let html = update_page_html(&strings(), "1.1.5", "1.0.20", None);
+        let html = update_page_html(&strings(), "1.1.6", "1.0.20", None);
 
         for id in ["id=\"install\"", "id=\"later\"", "id=\"skip\"", "id=\"close\""] {
             assert!(html.contains(id), "the update window must render {id}");
         }
         assert!(html.contains("data-tauri-drag-region"), "frameless window must be draggable");
-        assert!(html.contains("1.1.5") && html.contains("1.0.20"));
+        assert!(html.contains("1.1.6") && html.contains("1.0.20"));
     }
 
     #[test]
