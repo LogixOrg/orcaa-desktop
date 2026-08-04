@@ -155,7 +155,7 @@ Wiring lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs); the pages the sh
 | **Staying on screen**  | `clamp_window_to_work_area` pulls the window fully inside the _work area_ of whichever monitor its centre sits on, after restore and again on `ScaleFactorChanged`. **This is load-bearing:** the window-state plugin restores a saved position whenever the saved rect merely _intersects_ a monitor, so a window dragged until its title bar sat above the top edge came back exactly like that — caption buttons sliced in half, no title bar left to grab. |
 | **Session continuity** | The current URL + geometry are saved on every exit path — close button, tray Quit, and the updater's pre-exit hook.                                                                                                                                                     |
 | **External links**     | Any navigation off `*.orcaa.cloud` / `*.orcaa.test` is handed to the system browser — but only once the app itself is on screen, so a boot-time redirect can't open a browser on its own.                                                                               |
-| **Keyboard**           | <kbd>Ctrl</kbd>+<kbd>±</kbd>/<kbd>0</kbd> and <kbd>Ctrl</kbd>+wheel zoom (**persisted** across launches and re-applied after every navigation, since WebView2 resets the zoom factor on a top-level load), <kbd>Ctrl</kbd>+<kbd>R</kbd>/<kbd>F5</kbd> refresh — which asks the app first via a cancelable `orcaa:refresh` event (`useDesktopRefreshBridge` re-pulls active queries, matching the app's "never reload, re-pull data" rule) and only reloads the webview if nothing cancels it; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> always hard-reloads. <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> history (not mirrored for Arabic — Windows doesn't), <kbd>F11</kbd> fullscreen, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit. Bound by an injection script that claims **only** modified keys — the app owns bare keys, including its own <kbd>/</kbd> search. |
+| **Keyboard**           | <kbd>Ctrl</kbd>+<kbd>±</kbd>/<kbd>0</kbd> and <kbd>Ctrl</kbd>+wheel are **swallowed** — the webview is pinned at 100% zoom (the UI is designed for it; the app's font-scale preference is the sanctioned knob), and `reset_zoom` re-asserts 1.0 after every navigation so a host-level zoom from before the lock can't survive an upgrade. <kbd>Ctrl</kbd>+<kbd>R</kbd>/<kbd>F5</kbd> refresh — which asks the app first via a cancelable `orcaa:refresh` event (`useDesktopRefreshBridge` re-pulls active queries, matching the app's "never reload, re-pull data" rule) and only reloads the webview if nothing cancels it; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> always hard-reloads. <kbd>Alt</kbd>+<kbd>←</kbd>/<kbd>→</kbd> history (not mirrored for Arabic — Windows doesn't), <kbd>F11</kbd> fullscreen, <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit. Bound by an injection script that claims **only** modified keys — the app owns bare keys, including its own <kbd>/</kbd> search. |
 | **Context menu**       | **The app owns this** — `useGlobalContextMenu` already draws its own right-click menu and deliberately leaves the native one on editable fields for paste/spellcheck. The injected script must NOT bind `contextmenu`: it is injected at document-start, so calling `preventDefault()` makes the app's own handler see `defaultPrevented` and bail, leaving the page with **no** menu. The shell's own pages suppress it locally instead. Guarded by a test. |
 | **Notifications**      | Toasts are drawn by the shell (`shell_notify`), not the notification plugin, so clicking one **raises the window and navigates** to the page it was about. An incoming voice call is drawn as `Scenario::IncomingCall` — pre-expanded, persistent, looping the system ringtone, with Answer / Decline. The `url` is validated against the app's hosts in Rust before anything is navigated. |
 | **Audio**              | `--autoplay-policy=no-user-gesture-required`. Chromium drops audio no user gesture asked for, which is exactly the case for a notification sound arriving while the app sits in the tray — the toast would land in silence. Note this arg **replaces** wry's defaults, so they are repeated alongside it. |
@@ -168,7 +168,7 @@ Wiring lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs); the pages the sh
 
 ### Commands and the app ACL
 
-The crate exposes nine `#[tauri::command]`s (`signin_start`, `shell_zoom`, `shell_reload`,
+The crate exposes eight `#[tauri::command]`s (`signin_start`, `shell_reload`,
 `shell_fullscreen_toggle`, `shell_quit`, `shell_notify`, `update_install`, `update_snooze`,
 `update_skip`).
 
@@ -196,7 +196,7 @@ Once signed in, the webview sits on an `https://*.orcaa.cloud` origin. **Tauri r
 a remote origin** unless a capability lists that origin under `remote.urls`; `windows: ["main"]` alone only
 covers the _local_ context. That grant lives in
 [`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json), and it carries exactly two
-things: `notification:default` and `allow-shell-controls` (zoom / reload / fullscreen / quit, which the
+things: `notification:default` and `allow-shell-controls` (reload / fullscreen / quit, which the
 injected keyboard script calls from the tenant page).
 
 Delete or narrow it and `plugin:notification|notify` gets denied — the PWA's `sendNativeNotification()`
@@ -461,7 +461,7 @@ Windows uses NSIS `passive` mode (`/P /R`) — a progress bar, then the installe
 | Data                                                                    | Location (Windows)                                                            |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | Cookies, localStorage, IndexedDB, service worker cache (the PWA itself) | `%LOCALAPPDATA%\<identifier>\EBWebView\` (WebView2 user data)                 |
-| Last URL, tray-hint-seen flag, zoom level, update snooze / skipped version | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin)           |
+| Last URL, tray-hint-seen flag, update snooze / skipped version (a legacy `zoom_level` from pre-lock versions is deleted at startup) | `%APPDATA%\<identifier>\orcaa-desktop.json` (Tauri store plugin)           |
 | Window size / position / maximized                                      | `%APPDATA%\<identifier>\.window-state.json` (window-state plugin)             |
 | Shell logs (startup, update checks, failures)                           | `%LOCALAPPDATA%\<identifier>\logs\` — ask users for this file when diagnosing |
 | App install (NSIS)                                                      | `%LOCALAPPDATA%\Programs\Orcaa\`                                              |

@@ -26,15 +26,13 @@ commands.allow = ["signin_start"]
 [[permission]]
 identifier = "allow-shell-controls"
 description = """
-Desktop keyboard affordances for the hosted app: zoom in/out/reset, reload,
-fullscreen and quit.
+Desktop keyboard affordances for the hosted app: reload, fullscreen and quit.
 
 Granted to the remote origin because the script that binds these keys is injected
-into the tenant page. Zoom in particular has to round-trip through Rust so the
-level can be remembered between launches.
+into the tenant page. (Zoom is deliberately absent: the webview is pinned at
+100% — the injected script swallows the zoom keys and Ctrl+wheel outright.)
 """
 commands.allow = [
-  "shell_zoom",
   "shell_reload",
   "shell_fullscreen_toggle",
   "shell_quit",

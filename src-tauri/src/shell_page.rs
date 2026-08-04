@@ -651,9 +651,11 @@ const INIT_JS: &str = r#"
 
   // --- keyboard ----------------------------------------------------------
   // WebView2 handles reload and history natively on Windows; webkitgtk does
-  // not, and zoom has to come through Rust either way so the level can be
-  // remembered between launches. Routing all of it through commands keeps the
-  // behaviour identical on all three platforms.
+  // not. Routing them through commands keeps the behaviour identical on all
+  // three platforms. Zoom combinations are swallowed outright: the UI is
+  // designed for a fixed 100% zoom (the app's font-scale preference is the
+  // sanctioned knob), so the shell pins the webview at 1.0 and these keys do
+  // nothing.
   //
   // Only these exact combinations are claimed. The app owns bare keys — its
   // own "/" search shortcut must keep working.
@@ -662,13 +664,13 @@ const INIT_JS: &str = r#"
     const plain = !e.altKey && !e.shiftKey;
 
     if (mod && plain && (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd')) {
-      e.preventDefault(); invoke('shell_zoom', { step: 1 }); return;
+      e.preventDefault(); return;
     }
     if (mod && plain && (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract')) {
-      e.preventDefault(); invoke('shell_zoom', { step: -1 }); return;
+      e.preventDefault(); return;
     }
     if (mod && plain && (e.key === '0' || e.code === 'Numpad0')) {
-      e.preventDefault(); invoke('shell_zoom', { step: 0 }); return;
+      e.preventDefault(); return;
     }
     if ((mod && e.key.toLowerCase() === 'r') || e.key === 'F5') {
       e.preventDefault();
@@ -701,12 +703,12 @@ const INIT_JS: &str = r#"
     }
   });
 
-  // Ctrl+wheel zoom, which the webview's own handler would otherwise own — and
-  // would not persist.
+  // Ctrl+wheel (and precision-touchpad pinch, which arrives as a synthetic
+  // ctrlKey wheel) would otherwise zoom the webview — swallow it so the page
+  // stays at 100%.
   window.addEventListener('wheel', (e) => {
     if (!(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
-    invoke('shell_zoom', { step: e.deltaY < 0 ? 1 : -1 });
   }, { passive: false });
 })();
 "#;
@@ -786,7 +788,7 @@ mod tests {
         let html = update_page_html(
             &strings(),
             "1.0.0",
-            "1.1.4",
+            "1.1.5",
             Some("<img src=x onerror=alert(1)>\n</script><b>hi</b>"),
         );
 
@@ -806,13 +808,13 @@ mod tests {
 
     #[test]
     fn the_update_page_offers_all_three_choices() {
-        let html = update_page_html(&strings(), "1.1.4", "1.0.20", None);
+        let html = update_page_html(&strings(), "1.1.5", "1.0.20", None);
 
         for id in ["id=\"install\"", "id=\"later\"", "id=\"skip\"", "id=\"close\""] {
             assert!(html.contains(id), "the update window must render {id}");
         }
         assert!(html.contains("data-tauri-drag-region"), "frameless window must be draggable");
-        assert!(html.contains("1.1.4") && html.contains("1.0.20"));
+        assert!(html.contains("1.1.5") && html.contains("1.0.20"));
     }
 
     #[test]
@@ -821,7 +823,9 @@ mod tests {
 
         // A bare-key binding here would shadow the app's own "/" search.
         assert!(js.contains("e.ctrlKey || e.metaKey"));
-        assert!(js.contains("shell_zoom"));
+        // Zoom is pinned at 100% — the zoom combinations are swallowed, never
+        // routed to a command.
+        assert!(!js.contains("shell_zoom"), "zoom must stay locked at 100%");
         assert!(!js.contains("__DEBUG__"), "the debug flag must be substituted");
     }
 

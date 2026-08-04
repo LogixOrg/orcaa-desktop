@@ -32,6 +32,8 @@ use crate::updater::PendingUpdate;
 pub(crate) const STORE_FILE: &str = "orcaa-desktop.json";
 const STORE_KEY_LAST_URL: &str = "last_url";
 const STORE_KEY_TRAY_HINT_SEEN: &str = "tray_hint_seen";
+/// Legacy — zoom is pinned at 100% now. The key survives only so setup can
+/// delete whatever level a pre-lock version persisted.
 const STORE_KEY_ZOOM: &str = "zoom_level";
 
 const FALLBACK_URL_BUSINESS: &str = "https://auth.orcaa.cloud";
@@ -43,15 +45,6 @@ const MAIN_WINDOW: &str = "main";
 /// painted and the WebSocket has connected, so we're never swapping the binary
 /// out from under someone who is still watching the app boot.
 const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(20);
-
-/// The zoom ladder, matching what a browser offers. Rust owns it rather than the
-/// webview so the level survives a restart — a wrapper that forgets how big you
-/// made the text every time you quit is the sort of detail that makes an app
-/// feel unfinished.
-const ZOOM_STEPS: [f64; 12] = [
-    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5,
-];
-const ZOOM_DEFAULT_INDEX: usize = 5;
 
 /// Size, position and maximized/fullscreen are restored between launches.
 /// Visibility deliberately is **not** — the app hides to tray on close, so
@@ -384,27 +377,16 @@ fn maybe_show_tray_hint(app: &AppHandle, strings: &Strings) {
 }
 
 // ---------------------------------------------------------------------------
-// Zoom
+// Zoom — pinned at 100%
 // ---------------------------------------------------------------------------
 
-fn saved_zoom(app: &AppHandle) -> f64 {
-    app.store(STORE_FILE)
-        .ok()
-        .and_then(|store| store.get(STORE_KEY_ZOOM))
-        .and_then(|value| value.as_f64())
-        // A corrupted store must not be able to render the app unusable.
-        .filter(|zoom| *zoom >= ZOOM_STEPS[0] && *zoom <= ZOOM_STEPS[ZOOM_STEPS.len() - 1])
-        .unwrap_or(1.0)
-}
-
-/// Re-applied after every page load: WebView2 resets the zoom factor on a
-/// top-level navigation, so setting it once at startup would last exactly until
-/// the user opened a different route.
-fn apply_saved_zoom(app: &AppHandle, window: &WebviewWindow) {
-    let zoom = saved_zoom(app);
-    if (zoom - 1.0).abs() > f64::EPSILON {
-        let _ = window.set_zoom(zoom);
-    }
+/// Re-applied after every page load: WebView2 keeps a host-level zoom factor
+/// per profile (a user may have zoomed before this lock shipped, or the OS may
+/// restore one), so pinning once at startup would not hold across navigations.
+/// The UI is designed for a fixed 100% zoom — the app's own font-scale
+/// preference is the sanctioned knob.
+fn reset_zoom(window: &WebviewWindow) {
+    let _ = window.set_zoom(1.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -414,32 +396,6 @@ fn apply_saved_zoom(app: &AppHandle, window: &WebviewWindow) {
 #[tauri::command]
 fn signin_start(app: AppHandle) {
     start_browser_sign_in(&app);
-}
-
-#[tauri::command]
-fn shell_zoom(app: AppHandle, window: WebviewWindow, step: i32) {
-    let current = saved_zoom(&app);
-    let index = ZOOM_STEPS
-        .iter()
-        .position(|z| (z - current).abs() < 0.001)
-        .unwrap_or(ZOOM_DEFAULT_INDEX);
-
-    let next = if step == 0 {
-        ZOOM_DEFAULT_INDEX
-    } else {
-        (index as i32 + step).clamp(0, ZOOM_STEPS.len() as i32 - 1) as usize
-    };
-
-    let zoom = ZOOM_STEPS[next];
-    if let Err(err) = window.set_zoom(zoom) {
-        log::warn!("failed to set zoom: {err}");
-        return;
-    }
-
-    if let Ok(store) = app.store(STORE_FILE) {
-        store.set(STORE_KEY_ZOOM, json!(zoom));
-        let _ = store.save();
-    }
 }
 
 #[tauri::command]
@@ -610,7 +566,6 @@ pub fn run() {
         ))
         .invoke_handler(tauri::generate_handler![
             signin_start,
-            shell_zoom,
             shell_reload,
             shell_fullscreen_toggle,
             shell_quit,
@@ -633,6 +588,14 @@ pub fn run() {
             log::info!("starting {product_name} {version} ({identifier})");
 
             let store = app.store(STORE_FILE)?;
+
+            // Zoom is pinned at 100% now — drop whatever level a pre-lock
+            // version persisted so an upgraded install can never come back up
+            // at 80%/140%.
+            if store.delete(STORE_KEY_ZOOM) {
+                let _ = store.save();
+            }
+
             let saved = store
                 .get(STORE_KEY_LAST_URL)
                 .and_then(|v| v.as_str().map(String::from))
@@ -677,7 +640,6 @@ pub fn run() {
             };
 
             let nav_handle = app.handle().clone();
-            let load_handle = app.handle().clone();
             let load_product = product_name.clone();
 
             let window = tauri::WebviewWindowBuilder::new(
@@ -755,7 +717,7 @@ pub fn run() {
                 }
 
                 log::info!("page loaded: {}", payload.url());
-                apply_saved_zoom(&load_handle, &window);
+                reset_zoom(&window);
                 set_window_title(&window, &load_product);
             })
             .build()?;
