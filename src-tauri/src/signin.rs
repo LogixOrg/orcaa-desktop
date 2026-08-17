@@ -127,7 +127,6 @@ impl PendingSignIn {
 
         Some(Resolved { url })
     }
-
 }
 
 fn random_token(len: usize) -> String {
@@ -209,8 +208,10 @@ mod tests {
     #[test]
     fn a_matching_callback_resolves_to_the_tenant_handoff_url() {
         let (pending, state) = begin();
-        let incoming =
-            Url::parse(&format!("orcaa://auth?state={state}&token=abc&subdomain=clinic")).unwrap();
+        let incoming = Url::parse(&format!(
+            "orcaa://auth?state={state}&token=abc&subdomain=clinic"
+        ))
+        .unwrap();
 
         let resolved = pending.resolve(&incoming, "orcaa.cloud", "orcaa").unwrap();
 
@@ -222,8 +223,7 @@ mod tests {
     #[test]
     fn a_callback_with_the_wrong_state_is_dropped() {
         let (pending, _) = begin();
-        let incoming =
-            Url::parse("orcaa://auth?state=forged&token=abc&subdomain=clinic").unwrap();
+        let incoming = Url::parse("orcaa://auth?state=forged&token=abc&subdomain=clinic").unwrap();
 
         assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none());
     }
@@ -239,8 +239,10 @@ mod tests {
     #[test]
     fn a_callback_cannot_be_replayed() {
         let (pending, state) = begin();
-        let incoming =
-            Url::parse(&format!("orcaa://auth?state={state}&token=abc&subdomain=clinic")).unwrap();
+        let incoming = Url::parse(&format!(
+            "orcaa://auth?state={state}&token=abc&subdomain=clinic"
+        ))
+        .unwrap();
 
         assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_some());
         assert!(pending.resolve(&incoming, "orcaa.cloud", "orcaa").is_none());

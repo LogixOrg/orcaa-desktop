@@ -8,7 +8,9 @@
 #   TAURI_SIGNING_PRIVATE_KEY          - path to the private key (same one as Windows)
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - key password
 #
-# Run AFTER `pnpm desktop:build:business` (or :admin) on a macOS machine.
+# Emergency out-of-band patches only — normal releases go through the GitHub
+# Actions workflow. Run AFTER a local build on a macOS machine, e.g.
+#   pnpm tauri build --config src-tauri/tauri.business.conf.json
 # This script does NOT upload anything — copy the contents of
 # desktop/dist/<app>/ to your CDN at https://orcaa.cloud/desktop/<app>/
 

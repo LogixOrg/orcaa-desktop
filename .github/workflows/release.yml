@@ -154,6 +154,9 @@ jobs:
 
     env:
       APP: ${{ matrix.app }}
+      # Filled in by "Enable Windows signing" when the Azure secrets exist;
+      # empty means the extra --config flag simply isn't passed.
+      WIN_SIGN_ARGS: ""
 
     steps:
       - name: Checkout
@@ -273,12 +276,51 @@ jobs:
             echo "::warning::Signing without notarization (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing)."
           fi
 
+      # Windows Authenticode signing is OPTIONAL, mirroring the Apple block above.
+      # Azure Trusted Signing via trusted-signing-cli: with no Azure secrets the
+      # build still succeeds and ships an unsigned installer (SmartScreen warning,
+      # exactly as before). Configure these six secrets and signing turns on with
+      # zero workflow changes:
+      #   AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET  (app registration)
+      #   AZURE_TS_ENDPOINT  (e.g. https://weu.codesigning.azure.net)
+      #   AZURE_TS_ACCOUNT   (Trusted Signing account name)
+      #   AZURE_TS_PROFILE   (certificate profile name)
+      - name: Enable Windows signing (only if secrets are configured)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
+          AZURE_TS_ACCOUNT: ${{ secrets.AZURE_TS_ACCOUNT }}
+          AZURE_TS_PROFILE: ${{ secrets.AZURE_TS_PROFILE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AZURE_CLIENT_SECRET" || -z "$AZURE_TS_ENDPOINT" || -z "$AZURE_TS_ACCOUNT" || -z "$AZURE_TS_PROFILE" ]]; then
+            echo "::notice::Azure Trusted Signing secrets not configured — building an UNSIGNED Windows installer."
+            exit 0
+          fi
+
+          cargo install trusted-signing-cli --locked
+
+          # signCommand rides a config overlay so the committed configs stay
+          # signing-agnostic; Tauri merges repeated --config flags in order.
+          jq -n --arg cmd "trusted-signing-cli -e $AZURE_TS_ENDPOINT -a $AZURE_TS_ACCOUNT -c $AZURE_TS_PROFILE %1" \
+            '{bundle: {windows: {signCommand: $cmd}}}' > src-tauri/tauri.windows-sign.conf.json
+
+          echo "WIN_SIGN_ARGS=--config src-tauri/tauri.windows-sign.conf.json" >> "$GITHUB_ENV"
+          echo "Windows Authenticode signing enabled (Azure Trusted Signing)."
+
       - name: Build + sign + release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Consumed by trusted-signing-cli when Windows signing is enabled;
+          # empty and harmless otherwise.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           tagName: ${{ steps.app.outputs.tag }}
           releaseName: "${{ steps.app.outputs.product }} ${{ steps.app.outputs.tag }}"
@@ -308,7 +350,7 @@ jobs:
           # below — letting each runner write its own would have the second one
           # clobber the first one's platform entry.
           includeUpdaterJson: false
-          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ matrix.target.build_args }}
+          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ env.WIN_SIGN_ARGS }} ${{ matrix.target.build_args }}
 
       - name: Upload stable-name Windows installer
         if: runner.os == 'Windows'
@@ -373,6 +415,10 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
+      # Needed only to read CHANGELOG.md for the release notes below.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       # Built from the release's own *.sig assets rather than per-runner, so the
       # Windows, macOS and Linux entries always land in ONE manifest regardless
       # of job order or failure.
@@ -385,6 +431,20 @@ jobs:
             TAG="admin-v$VERSION"; MANIFEST="latest-admin.json"
           else
             TAG="v$VERSION"; MANIFEST="latest.json"
+          fi
+
+          # Release notes come from the CHANGELOG.md section matching this
+          # version. The branded update window renders exactly this text to end
+          # users — keep entries short, user-readable, no internal jargon.
+          # Missing entry -> generic fallback, same behavior as before.
+          NOTES=$(awk -v ver="$VERSION" '
+            /^## /{ if (found) exit; found = ($2 == ver); next }
+            found { print }
+          ' CHANGELOG.md 2>/dev/null | sed -e '/^[[:space:]]*$/d' || true)
+
+          if [[ -z "$NOTES" ]]; then
+            echo "::warning::No CHANGELOG.md entry for $VERSION — the update window will show the generic fallback text."
+            NOTES="Improvements and fixes."
           fi
 
           ASSETS=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
@@ -449,7 +509,7 @@ jobs:
 
           jq -n \
             --arg version "$VERSION" \
-            --arg notes "Improvements and fixes." \
+            --arg notes "$NOTES" \
             --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson platforms "$PLATFORMS" \
             '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \

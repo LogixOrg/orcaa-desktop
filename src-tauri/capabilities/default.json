@@ -6,12 +6,14 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
     "updater:default",
     "opener:default",
     "notification:default",
     "store:default",
     "allow-shell-signin",
     "allow-shell-controls",
+    "allow-shell-window",
     "allow-updater-window"
   ]
 }

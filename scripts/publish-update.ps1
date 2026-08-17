@@ -4,7 +4,9 @@
     Signs a Tauri NSIS bundle and emits the updater manifest (latest.json).
 
 .DESCRIPTION
-    Run after `pnpm desktop:build:business` or `pnpm desktop:build:admin`.
+    Emergency out-of-band patches only — normal releases go through the
+    GitHub Actions workflow. Run after a local build, e.g.
+    `pnpm tauri build --config src-tauri/tauri.business.conf.json`.
     Locates the .nsis.zip bundle, signs it with the Tauri private key, and writes
     `latest.json` describing the release. Uploading the artifacts to the CDN is
     your job — this script does NOT push anything.

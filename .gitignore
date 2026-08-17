@@ -5,8 +5,10 @@ pnpm-debug.log*
 npm-debug.log*
 
 # Rust / Cargo
+# Cargo.lock is COMMITTED on purpose: this is a binary crate, and without the
+# lockfile CI resolves fresh plugin versions on every run — a Tauri patch
+# release could change a shipped build with no code change.
 src-tauri/target/
-src-tauri/Cargo.lock
 src-tauri/gen/
 src-tauri/WixTools/
 
@@ -18,9 +20,10 @@ dist/
 *.tauri.key.pub
 *.key
 
-# Generated icons — keep source-icons/*.png in git, regenerate icons/<app>/* per build
-src-tauri/icons/business/
-src-tauri/icons/admin/
+# Generated icons — keep source-icons/*.png in git, regenerate icons/* per
+# build (the default set at icons/ root is what a local `cargo test` on Windows
+# needs for the resource file: `pnpm tauri icon src-tauri/source-icons/business.png`)
+src-tauri/icons/
 
 # Editors
 .vscode/

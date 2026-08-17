@@ -123,12 +123,19 @@ fn base_domain_of(url: &Url) -> String {
 }
 
 /// A real Orcaa web address — as opposed to the shell's own scaffolding page.
+///
+/// Must stay in agreement with `capabilities/remote.json` — a host that
+/// capability grants IPC to but this function rejects gets bounced to the
+/// system browser before its page can ever call anything.
 pub(crate) fn is_orcaa_host(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url
             .host_str()
             .map(|h| {
-                h == "orcaa.cloud" || h.ends_with(".orcaa.cloud") || h.ends_with(".orcaa.test")
+                h == "orcaa.cloud"
+                    || h.ends_with(".orcaa.cloud")
+                    || h == "orcaa.test"
+                    || h.ends_with(".orcaa.test")
             })
             .unwrap_or(false)
 }
@@ -231,7 +238,11 @@ fn clamp_window_to_work_area(window: &WebviewWindow) {
         let _ = window.set_size(tauri::PhysicalSize::new(w, h));
     }
     if (x, y) != (pos.x, pos.y) {
-        log::info!("pulled the window back on screen: ({},{}) -> ({x},{y})", pos.x, pos.y);
+        log::info!(
+            "pulled the window back on screen: ({},{}) -> ({x},{y})",
+            pos.x,
+            pos.y
+        );
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }
@@ -241,6 +252,54 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+/// The global summon shortcut's behaviour: bring the app forward, unless it is
+/// already the thing in front — then put it away again.
+fn toggle_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+
+    let visible = window.is_visible().unwrap_or(false);
+    let focused = window.is_focused().unwrap_or(false);
+
+    if visible && focused {
+        let _ = window.hide();
+    } else {
+        show_main_window(app);
+    }
+}
+
+/// Tray quick actions: raise the window and jump to an app page.
+///
+/// Only ever swaps the *path* on the origin the webview already sits on, so a
+/// tray item can never move the app to another host. Before sign-in the webview
+/// is on a shell page with no tenant origin — the action then just raises the
+/// window, which is the most useful thing it can do there.
+fn open_app_path(app: &AppHandle, path: &str) {
+    show_main_window(app);
+
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let Ok(current) = window.url() else {
+        return;
+    };
+    if !is_orcaa_host(&current) {
+        return;
+    }
+
+    let mut url = current.clone();
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+
+    if url != current {
+        if let Err(err) = window.navigate(url) {
+            log::error!("tray navigation failed: {err}");
+        }
     }
 }
 
@@ -287,16 +346,20 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
         return;
     };
 
-    let Some(resolved) = app
-        .state::<PendingSignIn>()
-        .resolve(incoming, &config.base_domain, &config.deep_link_scheme)
-    else {
+    let Some(resolved) = app.state::<PendingSignIn>().resolve(
+        incoming,
+        &config.base_domain,
+        &config.deep_link_scheme,
+    ) else {
         // Unsolicited, replayed, or tampered — indistinguishable on purpose.
         log::warn!("ignoring a deep link that does not match a pending sign-in");
         return;
     };
 
-    log::info!("resuming sign-in on {}", resolved.url.host_str().unwrap_or("?"));
+    log::info!(
+        "resuming sign-in on {}",
+        resolved.url.host_str().unwrap_or("?")
+    );
 
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         if let Err(err) = window.navigate(resolved.url) {
@@ -416,6 +479,117 @@ fn shell_quit(app: AppHandle) {
 }
 
 // ---------------------------------------------------------------------------
+// Custom titlebar (Windows only — macOS keeps its traffic lights via the
+// Overlay titlebar style, Linux keeps native decorations because undecorated
+// GTK windows lose their resize edges)
+// ---------------------------------------------------------------------------
+
+/// The window buttons the web topbar draws when the OS frame is gone.
+///
+/// Scoped to the main window: the update window has its own chrome, and the
+/// action set is fixed so the remote page can never do more than the three
+/// caption buttons could.
+#[tauri::command]
+fn shell_window_control(window: WebviewWindow, action: String) {
+    if window.label() != MAIN_WINDOW {
+        return;
+    }
+
+    match action.as_str() {
+        "minimize" => {
+            let _ = window.minimize();
+        }
+        "toggle-maximize" => {
+            if window.is_maximized().unwrap_or(false) {
+                let _ = window.unmaximize();
+            } else {
+                let _ = window.maximize();
+            }
+        }
+        // `close()` (not `destroy()`) so this rides the CloseRequested handler
+        // and hides to the tray exactly like the native X did.
+        "close" => {
+            let _ = window.close();
+        }
+        other => log::warn!("ignoring unknown window control action: {other}"),
+    }
+}
+
+/// Lets the web titlebar draw the right maximize/restore glyph. Polled on the
+/// DOM `resize` event rather than pushed — the state only matters while the
+/// user is looking at the button.
+#[tauri::command]
+fn shell_window_state(window: WebviewWindow) -> serde_json::Value {
+    json!({
+        "maximized": window.is_maximized().unwrap_or(false),
+        "fullscreen": window.is_fullscreen().unwrap_or(false),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Unread badge
+// ---------------------------------------------------------------------------
+
+/// A red dot for the Windows taskbar overlay, drawn in code so no asset or
+/// image crate is needed. Windows renders it at 16x16 in the icon's corner —
+/// a count would be unreadable at that size, so presence is the signal.
+#[cfg(windows)]
+fn badge_overlay_icon() -> tauri::image::Image<'static> {
+    const SIZE: u32 = 32;
+    let center = (SIZE as f32 - 1.0) / 2.0;
+    let radius = SIZE as f32 * 0.42;
+
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let distance = (dx * dx + dy * dy).sqrt();
+            // One-pixel soft edge so the dot doesn't alias into a blob.
+            let alpha = ((radius - distance + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            let i = ((y * SIZE + x) * 4) as usize;
+            rgba[i] = 0xe8;
+            rgba[i + 1] = 0x11;
+            rgba[i + 2] = 0x23;
+            rgba[i + 3] = alpha;
+        }
+    }
+
+    tauri::image::Image::new_owned(rgba, SIZE, SIZE)
+}
+
+/// Mirrors the web app's unread notification count onto the taskbar/dock.
+///
+/// macOS/Linux get a real number on the dock icon; Windows has no numeric
+/// badge API, so any non-zero count shows a red-dot overlay. Zero clears.
+#[tauri::command]
+fn shell_badge(window: WebviewWindow, count: u64) {
+    if window.label() != MAIN_WINDOW {
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        let icon = if count == 0 {
+            None
+        } else {
+            Some(badge_overlay_icon())
+        };
+        if let Err(err) = window.set_overlay_icon(icon) {
+            log::warn!("failed to set the taskbar badge: {err}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let badge = if count == 0 { None } else { Some(count as i64) };
+        if let Err(err) = window.set_badge_count(badge) {
+            log::warn!("failed to set the dock badge: {err}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Downloads
 // ---------------------------------------------------------------------------
 
@@ -523,8 +697,29 @@ pub fn run() {
                 },
             };
 
+            // The config-level `app.security.csp` never reaches these pages —
+            // it only decorates the asset protocol, and this app has no
+            // `frontendDist` — so the policy rides the response header instead.
+            // Everything a shell page uses is inline (styles, scripts, the SVG
+            // logo); the only network egress is the reachability probe against
+            // the tenant host, plus Tauri's own IPC transport, which is a
+            // `fetch` to `ipc:`/`http://ipc.localhost` on macOS and Linux.
+            // Rust-side `eval` (updater progress) executes outside page CSP.
             tauri::http::Response::builder()
-                .header(tauri::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(
+                    tauri::http::header::CONTENT_TYPE,
+                    "text/html; charset=utf-8",
+                )
+                .header(
+                    tauri::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'; \
+                     script-src 'unsafe-inline'; img-src data:; \
+                     connect-src ipc: http://ipc.localhost \
+                     https://orcaa.cloud https://*.orcaa.cloud \
+                     http://orcaa.test http://*.orcaa.test \
+                     https://orcaa.test https://*.orcaa.test; \
+                     base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                )
                 .body(html.into_bytes())
                 .expect("shell page response must build")
         })
@@ -569,6 +764,9 @@ pub fn run() {
             shell_reload,
             shell_fullscreen_toggle,
             shell_quit,
+            shell_window_control,
+            shell_window_state,
+            shell_badge,
             notify::shell_notify,
             updater::update_install,
             updater::update_snooze,
@@ -642,7 +840,7 @@ pub fn run() {
             let nav_handle = app.handle().clone();
             let load_product = product_name.clone();
 
-            let window = tauri::WebviewWindowBuilder::new(
+            let window_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 MAIN_WINDOW,
                 tauri::WebviewUrl::CustomProtocol(shell_url(&start_page, false)),
@@ -719,8 +917,23 @@ pub fn run() {
                 log::info!("page loaded: {}", payload.url());
                 reset_zoom(&window);
                 set_window_title(&window, &load_product);
-            })
-            .build()?;
+            });
+
+            // Branded titlebar. Windows drops the OS frame — the web topbar
+            // draws the caption buttons via `shell_window_control` and drags
+            // via `data-tauri-drag-region` (shadow(true) keeps the resize
+            // borders and edge-snap). macOS keeps its native traffic lights
+            // floating over the page instead: custom buttons there would lose
+            // the fullscreen/Stage Manager behaviours. Linux stays fully
+            // native — undecorated GTK windows have no resize edges.
+            #[cfg(windows)]
+            let window_builder = window_builder.decorations(false).shadow(true);
+            #[cfg(target_os = "macos")]
+            let window_builder = window_builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+
+            let window = window_builder.build()?;
 
             // Runs after the window-state plugin's `on_window_ready` hook, so
             // this sees the geometry the user is actually about to get.
@@ -745,8 +958,66 @@ pub fn run() {
                 }
             }
 
+            // Global summon shortcut — the app lives in the tray, so it needs a
+            // key that works from anywhere. Ctrl(⌘)+Shift+O for business,
+            // Ctrl(⌘)+Shift+A for admin, so running both apps doesn't make them
+            // fight over one chord. A registration conflict with some other
+            // program is logged and ignored — never fatal.
+            {
+                use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+
+                let modifiers = if cfg!(target_os = "macos") {
+                    Modifiers::SUPER | Modifiers::SHIFT
+                } else {
+                    Modifiers::CONTROL | Modifiers::SHIFT
+                };
+                let code = if identifier.contains("admin") {
+                    Code::KeyA
+                } else {
+                    Code::KeyO
+                };
+                let summon = Shortcut::new(Some(modifiers), code);
+
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, shortcut, event| {
+                            if event.state() == ShortcutState::Pressed && shortcut == &summon {
+                                toggle_main_window(app);
+                            }
+                        })
+                        .build(),
+                )?;
+
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                if let Err(err) = app.global_shortcut().register(summon) {
+                    log::warn!("summon shortcut unavailable (taken by another app?): {err}");
+                }
+            }
+
             let show_item =
                 MenuItem::with_id(app, "show", strings.tray_open(), true, None::<&str>)?;
+            // Quick jumps to the two pages each audience reaches for most. The
+            // handler only ever swaps the path on the current origin (see
+            // `open_app_path`), so these are navigation sugar, not new powers.
+            let is_admin_build = identifier.contains("admin");
+            let quick_primary = MenuItem::with_id(
+                app,
+                "nav_primary",
+                if is_admin_build {
+                    strings.tray_today()
+                } else {
+                    strings.tray_pos()
+                },
+                true,
+                None::<&str>,
+            )?;
+            let quick_dashboard = MenuItem::with_id(
+                app,
+                "nav_dashboard",
+                strings.tray_dashboard(),
+                true,
+                None::<&str>,
+            )?;
             let update_item = MenuItem::with_id(
                 app,
                 "check_updates",
@@ -772,6 +1043,9 @@ pub fn run() {
                 &[
                     &show_item,
                     &PredefinedMenuItem::separator(app)?,
+                    &quick_primary,
+                    &quick_dashboard,
+                    &PredefinedMenuItem::separator(app)?,
                     &autostart_item,
                     &update_item,
                     &PredefinedMenuItem::separator(app)?,
@@ -789,6 +1063,9 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    // Admin's Today command center lives at "/", not "/today".
+                    "nav_primary" => open_app_path(app, if is_admin_build { "/" } else { "/pos" }),
+                    "nav_dashboard" => open_app_path(app, "/dashboard"),
                     "autostart" => {
                         let manager = app.autolaunch();
                         let enabled = manager.is_enabled().unwrap_or(false);
@@ -803,7 +1080,10 @@ pub fn run() {
                             // rather than toggled optimistically — a blocked
                             // registry write must not leave the menu claiming
                             // something that isn't true.
-                            Ok(()) => log::info!("autostart {}", if enabled { "disabled" } else { "enabled" }),
+                            Ok(()) => log::info!(
+                                "autostart {}",
+                                if enabled { "disabled" } else { "enabled" }
+                            ),
                             Err(err) => log::error!("failed to change autostart: {err}"),
                         }
                         let _ = autostart_item.set_checked(manager.is_enabled().unwrap_or(false));
@@ -892,9 +1172,9 @@ fn set_window_title(window: &WebviewWindow, product: &str) {
     let window = window.clone();
     let product = product.to_string();
 
-    let _ = window.clone().eval_with_callback(
-        "document.title",
-        move |value: String| {
+    let _ = window
+        .clone()
+        .eval_with_callback("document.title", move |value: String| {
             let page = value.trim().trim_matches('"').trim();
             let title = if page.is_empty() || page.eq_ignore_ascii_case(&product) {
                 product.clone()
@@ -902,8 +1182,7 @@ fn set_window_title(window: &WebviewWindow, product: &str) {
                 format!("{page} — {product}")
             };
             let _ = window.set_title(&title);
-        },
-    );
+        });
 }
 
 #[cfg(test)]
@@ -916,8 +1195,16 @@ mod tests {
         let area = (0, 0, 1920, 1040);
         let (x, y, w, h) = clamped_rect((300, -18, 1440, 900), area);
 
-        assert_eq!((x, y), (300, 0), "the window must start at the work area top");
-        assert_eq!((w, h), (1440, 900), "a window that already fits must not be resized");
+        assert_eq!(
+            (x, y),
+            (300, 0),
+            "the window must start at the work area top"
+        );
+        assert_eq!(
+            (w, h),
+            (1440, 900),
+            "a window that already fits must not be resized"
+        );
     }
 
     #[test]
@@ -980,7 +1267,10 @@ mod tests {
             "orcaa-shell://localhost/",
         ] {
             let url: Url = raw.parse().unwrap();
-            assert!(is_shell_url(&url), "{raw} should be recognised as the shell");
+            assert!(
+                is_shell_url(&url),
+                "{raw} should be recognised as the shell"
+            );
             assert!(!is_orcaa_host(&url), "{raw} must not be persisted");
             // Still internal — it must never be handed to the system browser.
             assert!(is_internal_url(&url));
@@ -1002,7 +1292,10 @@ mod tests {
             "https://clinic.orcaa.cloud/reset-password?token=x",
         ];
         for raw in bounced {
-            assert!(is_sign_in_route(&raw.parse().unwrap()), "{raw} should bounce");
+            assert!(
+                is_sign_in_route(&raw.parse().unwrap()),
+                "{raw} should bounce"
+            );
         }
 
         let allowed = [
@@ -1011,7 +1304,10 @@ mod tests {
             "https://clinic.orcaa.cloud/dashboard",
         ];
         for raw in allowed {
-            assert!(!is_sign_in_route(&raw.parse().unwrap()), "{raw} should load");
+            assert!(
+                !is_sign_in_route(&raw.parse().unwrap()),
+                "{raw} should load"
+            );
         }
     }
 }

@@ -54,6 +54,28 @@ before anything is navigated — this command is reachable from the remote page.
 commands.allow = ["shell_notify"]
 
 [[permission]]
+identifier = "allow-shell-window"
+description = """
+The custom titlebar's caption buttons (minimize / maximize / close) plus the
+maximized-state read that picks the right glyph.
+
+Needed wherever the OS frame is gone: the web topbar on Windows, and the
+shell's own welcome/boot pages. The action set is fixed in Rust and scoped to
+the main window, so this grants nothing the native caption buttons didn't do —
+close in particular still rides CloseRequested and hides to the tray.
+"""
+commands.allow = ["shell_window_control", "shell_window_state"]
+
+[[permission]]
+identifier = "allow-shell-badge"
+description = """
+Mirrors the web app's unread notification count onto the taskbar (Windows: a
+red-dot overlay) or dock (macOS/Linux: a numeric badge). Zero clears it. The
+count is the only input and it draws nothing but the badge.
+"""
+commands.allow = ["shell_badge"]
+
+[[permission]]
 identifier = "allow-updater-window"
 description = """
 The three choices the update window offers: install now, remind me later, and

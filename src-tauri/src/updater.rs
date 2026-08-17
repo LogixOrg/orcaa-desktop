@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_store::StoreExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -87,7 +87,10 @@ fn is_muted(app: &AppHandle, version: &str) -> bool {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     if now_secs() < snoozed_until {
-        log::info!("update prompt snoozed for another {}s", snoozed_until - now_secs());
+        log::info!(
+            "update prompt snoozed for another {}s",
+            snoozed_until - now_secs()
+        );
         return true;
     }
 
@@ -111,7 +114,11 @@ pub async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bo
         Err(err) => {
             log::error!("failed to build updater: {err}");
             if interactive {
-                notify(&app, &strings.update_failed_title(), &strings.update_failed_body());
+                notify(
+                    &app,
+                    &strings.update_failed_title(),
+                    &strings.update_failed_body(),
+                );
             }
             return;
         }
@@ -142,13 +149,21 @@ pub async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bo
         Ok(None) => {
             log::info!("no update available");
             if interactive {
-                notify(&app, &strings.update_none_title(), &strings.update_none_body());
+                notify(
+                    &app,
+                    &strings.update_none_title(),
+                    &strings.update_none_body(),
+                );
             }
         }
         Err(err) => {
             log::error!("update check failed: {err}");
             if interactive {
-                notify(&app, &strings.update_failed_title(), &strings.update_failed_body());
+                notify(
+                    &app,
+                    &strings.update_failed_title(),
+                    &strings.update_failed_body(),
+                );
             }
         }
     }
@@ -166,9 +181,11 @@ fn center_on_main(app: &AppHandle, window: &tauri::WebviewWindow) {
         return;
     };
 
-    let (Ok(main_pos), Ok(main_size), Ok(size)) =
-        (main.outer_position(), main.outer_size(), window.outer_size())
-    else {
+    let (Ok(main_pos), Ok(main_size), Ok(size)) = (
+        main.outer_position(),
+        main.outer_size(),
+        window.outer_size(),
+    ) else {
         let _ = window.center();
         return;
     };
@@ -186,7 +203,12 @@ fn center_on_main(app: &AppHandle, window: &tauri::WebviewWindow) {
             let work = monitor.work_area();
             let (x, y, _, _) = clamped_rect(
                 (x, y, size.width, size.height),
-                (work.position.x, work.position.y, work.size.width, work.size.height),
+                (
+                    work.position.x,
+                    work.position.y,
+                    work.size.width,
+                    work.size.height,
+                ),
             );
             (x, y)
         }
@@ -246,7 +268,9 @@ fn open_update_window(app: &AppHandle, strings: &Strings) -> tauri::Result<()> {
     if let Some(main) = app.get_webview_window("main") {
         match updater_window_builder(app, strings).parent(&main) {
             Ok(builder) => return builder.build().map(|_| ()),
-            Err(err) => log::warn!("could not parent the update window, opening it standalone: {err}"),
+            Err(err) => {
+                log::warn!("could not parent the update window, opening it standalone: {err}")
+            }
         }
     }
 
@@ -280,7 +304,11 @@ fn store_set(app: &AppHandle, key: &str, value: serde_json::Value) {
 }
 
 fn snooze(app: &AppHandle) {
-    store_set(app, STORE_KEY_SNOOZED_UNTIL, json!(now_secs() + SNOOZE.as_secs()));
+    store_set(
+        app,
+        STORE_KEY_SNOOZED_UNTIL,
+        json!(now_secs() + SNOOZE.as_secs()),
+    );
     log::info!("update postponed for {}h", SNOOZE.as_secs() / 3600);
 }
 
@@ -406,7 +434,11 @@ pub fn update_snooze(app: AppHandle) {
 #[tauri::command]
 pub fn update_skip(app: AppHandle) {
     if let Some(update) = app.state::<PendingUpdate>().get() {
-        store_set(&app, STORE_KEY_SKIPPED_VERSION, json!(update.version.clone()));
+        store_set(
+            &app,
+            STORE_KEY_SKIPPED_VERSION,
+            json!(update.version.clone()),
+        );
         log::info!("user skipped version {}", update.version);
     }
     close_window(&app);

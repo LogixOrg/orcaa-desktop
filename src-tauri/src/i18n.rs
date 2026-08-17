@@ -69,6 +69,34 @@ impl Strings {
         self.pick("Quit", "إنهاء")
     }
 
+    // ---- Tray quick actions -------------------------------------------
+
+    pub fn tray_pos(&self) -> String {
+        self.pick("Point of Sale", "نقطة البيع")
+    }
+
+    pub fn tray_dashboard(&self) -> String {
+        self.pick("Dashboard", "لوحة التحكم")
+    }
+
+    pub fn tray_today(&self) -> String {
+        self.pick("Today", "اليوم")
+    }
+
+    // ---- Window controls (the shell pages' own titlebar on Windows) ----
+
+    pub fn window_minimize(&self) -> String {
+        self.pick("Minimize", "تصغير")
+    }
+
+    pub fn window_maximize(&self) -> String {
+        self.pick("Maximize", "تكبير")
+    }
+
+    pub fn window_close(&self) -> String {
+        self.pick("Close", "إغلاق")
+    }
+
     // ---- Hide-to-tray hint (shown once, the first time X is pressed) ---
 
     pub fn tray_hint_title(&self) -> String {
@@ -208,16 +236,14 @@ impl Strings {
     /// reads like something the OS offers rather than something we invented.
     pub fn tray_autostart(&self) -> String {
         match self.lang {
-            Lang::En => {
-                if cfg!(target_os = "macos") {
-                    "Open at Login"
-                } else if cfg!(windows) {
-                    "Start with Windows"
-                } else {
-                    "Start on login"
-                }
-                .to_string()
+            Lang::En => if cfg!(target_os = "macos") {
+                "Open at Login"
+            } else if cfg!(windows) {
+                "Start with Windows"
+            } else {
+                "Start on login"
             }
+            .to_string(),
             Lang::Ar => "التشغيل عند بدء النظام".to_string(),
         }
     }

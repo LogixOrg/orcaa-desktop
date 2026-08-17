@@ -195,9 +195,13 @@ Push-when-truly-quit (after user picks Quit in tray) is a v2 concern — require
 Once signed in, the webview sits on an `https://*.orcaa.cloud` origin. **Tauri rejects every IPC call from
 a remote origin** unless a capability lists that origin under `remote.urls`; `windows: ["main"]` alone only
 covers the _local_ context. That grant lives in
-[`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json), and it carries exactly two
-things: `notification:default` and `allow-shell-controls` (reload / fullscreen / quit, which the
-injected keyboard script calls from the tenant page).
+[`src-tauri/capabilities/remote.json`](src-tauri/capabilities/remote.json), and it carries:
+`notification:default`, `allow-shell-controls` (reload / fullscreen / quit, which the injected
+keyboard script calls from the tenant page), `allow-shell-notify` (the clickable/ringing toast command
+the PWA prefers over the plugin), `allow-shell-window` + `core:window:allow-start-dragging` +
+`core:window:allow-internal-toggle-maximize` (the custom titlebar — see "Branded titlebar" below),
+`allow-shell-badge` (the unread taskbar/dock badge), and a scope-restricted `opener:allow-open-url`
+(https/http/mailto/tel only — deliberately not `open_path` or `reveal_item_in_dir`).
 
 Delete or narrow it and `plugin:notification|notify` gets denied — the PWA's `sendNativeNotification()`
 catches the rejection and returns `false`, so **the app looks completely healthy while no toast ever
@@ -214,6 +218,42 @@ Windows toasts additionally need the installed app's Start Menu shortcut to carr
 `System.AppUserModel.ID` = the bundle identifier. Tauri's NSIS installer does this automatically, which
 is why toasts only work from an **installed** build — `pnpm dev:business` runs out of `target/debug`,
 where the plugin deliberately skips setting the app ID.
+
+---
+
+## Branded titlebar (custom window chrome)
+
+The stock OS frame is gone — the app wears Orcaa chrome, split per platform:
+
+- **Windows** — the main window is frameless (`decorations(false)` + `shadow(true)`, which keeps the
+  resize borders and edge-snap). The web app's **topbar doubles as the titlebar**: the shared
+  `WindowControls` component draws minimize / maximize-restore / close at the topbar's end and calls
+  `shell_window_control`; empty topbar stretches carry `data-tauri-drag-region` (double-click there
+  toggles maximize via `core:window:allow-internal-toggle-maximize`). Close rides the normal
+  CloseRequested path, so hide-to-tray behaves exactly as before. The shell's own welcome/boot pages
+  draw their own slim titlebar (`shell_page.rs`, Windows-only, `centered` pages only — the update
+  window keeps its bespoke chrome). Known tradeoff: Win11's snap-layout hover on the maximize button
+  is lost; drag-to-edge and Win+arrows still work.
+- **macOS** — native traffic lights stay, floating over the page via `TitleBarStyle::Overlay` +
+  `hidden_title`. The web topbar pads around them (`html.orcaa-desktop-mac` root class →
+  `padding-left: 84px` in `shared/styles/layout/topbar.css`).
+- **Linux** — fully native frame. Undecorated GTK windows lose their resize edges, so frameless is
+  not worth it there.
+
+The web side detects the shell with `isTauri()` + a UA platform check — no config flows between the
+shell and the page.
+
+## Native presence
+
+- **Unread badge** — `shell_badge(count)` mirrors the web bell's unread count onto the taskbar
+  (Windows: red-dot overlay drawn in code) or dock (macOS/Linux: numeric badge). Wired from both
+  AppTopbars via `useDesktopBadge`; zero (and sign-out) clears it.
+- **Global summon shortcut** — Ctrl(⌘)+Shift+O (business) / Ctrl(⌘)+Shift+A (admin) toggles the
+  window from anywhere, via `tauri-plugin-global-shortcut`. A registration conflict with another
+  program is logged and ignored, never fatal.
+- **Tray quick actions** — Point of Sale + Dashboard (business), Today + Dashboard (admin). These
+  only swap the *path* on the origin the webview already sits on (`open_app_path`), so the tray can
+  never steer the app to another host; before sign-in they simply raise the window.
 
 ---
 
@@ -317,7 +357,12 @@ Keep all five in lockstep — both apps share one Rust crate, so they version to
 #    src-tauri/Cargo.toml               → version = "1.0.3"
 #    package.json                       → "version": "1.0.3"
 
-# 2. Commit + tag + push
+# 2. Add a "## 1.0.3" section to CHANGELOG.md — user-facing bullets only.
+#    The manifest job puts that section verbatim into latest.json, and the
+#    branded update window shows it to every user as "What's new". No entry
+#    → CI warns and users get the generic "Improvements and fixes." line.
+
+# 3. Commit + tag + push
 git add -A
 git commit -m "chore: bump to 1.0.3"
 git tag v1.0.3
@@ -349,7 +394,10 @@ Go to **Actions** tab → **Build & Release Desktop** → **Run workflow** → p
 
 ### Releasing the admin app
 
-The default workflow builds the **business** app. For admin: trigger via "Run workflow" → admin, OR clone the workflow into `.github/workflows/release-admin.yml` and change the matrix.
+A plain `v*.*.*` tag builds **both** apps (business + admin) — they share one crate, so a shared fix
+must reach both. `admin-v*.*.*` builds admin only; "Run workflow" lets you pick either or both. Admin
+releases land on their own `admin-v*` tag marked prerelease, which keeps `/releases/latest/` (and the
+landing page's stable download URLs) resolving to business builds.
 
 ---
 
@@ -489,9 +537,10 @@ The GitHub Actions workflow uploads stable-name copies of the versioned installe
 
 ## Follow-ups (not in v1)
 
-- **Code signing (Windows)** — Sectigo OV cert (~$200/yr) or DigiCert EV cert (~$400/yr). Removes SmartScreen warnings.
+- **Code signing (Windows)** — secrets-only setup, already wired in the workflow via Azure Trusted
+  Signing (~$10/mo; see "Enable Windows signing" in `release.yml` for the six secrets). Configure the
+  Azure account + app registration and SmartScreen warnings disappear with zero workflow changes.
 - **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Secrets-only setup, already wired in the workflow (see "Apple signing + notarization" above). Removes Gatekeeper warnings.
-- **Native deep-link auth** (`orcaa://`) — register a custom URL scheme so the auth subdomain can hand control back to a running desktop app after a system-browser SSO. Required if Orcaa moves to social-only login (Google/Microsoft).
 - **Camera / microphone permission** — `wry` registers a WebView2 `PermissionRequested` handler **only** when clipboard access is enabled, and even then only auto-allows clipboard-read (`wry/src/webview2/mod.rs:500`); there is no public API for the rest. Mic and camera therefore fall through to WebView2's own prompt, which Chromium persists per origin — so it should ask once and then remember. **Unverified in a real build**: if voice calls or the QR scanner turn out to re-prompt or fail, the options are `--use-fake-ui-for-media-stream` (auto-grants for *every* origin in the webview — not acceptable) or an upstream `wry` change.
 - **Custom user agent** — deliberately _not_ set. `user_agent()` replaces the UA string wholesale, and the tenant subdomains sit behind Cloudflare, where a non-standard UA risks bot challenges. The PWA already identifies the shell via `__TAURI_INTERNALS__`; if the backend needs to know, send a header instead.
 - **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push.

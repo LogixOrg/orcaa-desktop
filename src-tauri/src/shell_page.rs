@@ -186,6 +186,23 @@ button.link {
 button.link:hover { color: var(--text); }
 .cta:focus-visible, button:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 
+/* --- frameless-window titlebar (Windows-only, "centered" pages) ---------- */
+.app-titlebar {
+  position: fixed; top: 0; left: 0; right: 0; height: 2.5rem;
+  display: flex; align-items: center; justify-content: flex-end;
+  /* Caption buttons stay top-right even in Arabic — Windows convention. */
+  direction: ltr;
+  z-index: 10;
+}
+.app-titlebar .controls { display: flex; height: 100%; }
+.app-titlebar .controls button {
+  width: 3.3rem; height: 100%; border: 0; background: none; cursor: default;
+  color: var(--text-soft);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.app-titlebar .controls button:hover { background: var(--track); color: var(--text); }
+.app-titlebar .controls button:last-child:hover { background: var(--danger); color: #fff; }
+
 /* --- spinner ------------------------------------------------------------- */
 .spinner {
   width: 1.75rem; height: 1.75rem; margin: 0 auto 1.5rem;
@@ -263,12 +280,67 @@ const NO_CONTEXT_MENU_JS: &str =
     "if(!__DEBUG__)document.addEventListener('contextmenu',e=>e.preventDefault());";
 
 fn no_context_menu_js() -> String {
-    NO_CONTEXT_MENU_JS.replace("__DEBUG__", if cfg!(debug_assertions) { "true" } else { "false" })
+    NO_CONTEXT_MENU_JS.replace(
+        "__DEBUG__",
+        if cfg!(debug_assertions) {
+            "true"
+        } else {
+            "false"
+        },
+    )
 }
+
+/// The caption buttons for the shell's own pages, drawn only on Windows where
+/// the main window has no OS frame. The glyphs are inline strokes, not text —
+/// Segoe's caption characters aren't in every font fallback chain.
+fn shell_titlebar_html(strings: &Strings) -> String {
+    format!(
+        r#"<header class="app-titlebar" data-tauri-drag-region>
+  <div class="controls">
+    <button id="win-min" type="button" aria-label="{min}" title="{min}">
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor"/></svg>
+    </button>
+    <button id="win-max" type="button" aria-label="{max}" title="{max}">
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>
+    </button>
+    <button id="win-close" type="button" aria-label="{close}" title="{close}">
+      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg>
+    </button>
+  </div>
+</header>"#,
+        min = escape_html(&strings.window_minimize()),
+        max = escape_html(&strings.window_maximize()),
+        close = escape_html(&strings.window_close()),
+    )
+}
+
+/// Wires the caption buttons to `shell_window_control`. Close rides the same
+/// CloseRequested path as the native X did, so hide-to-tray still applies.
+const SHELL_TITLEBAR_JS: &str = r#"
+(() => {
+  const control = (action) =>
+    window.__TAURI_INTERNALS__.invoke('shell_window_control', { action });
+  const bind = (id, action) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', () => control(action));
+  };
+  bind('win-min', 'minimize');
+  bind('win-max', 'toggle-maximize');
+  bind('win-close', 'close');
+})();
+"#;
 
 /// Wraps a body in the shared document shell. Every shell page goes through
 /// here so `lang`/`dir` and the stylesheet can never drift apart between pages.
 fn document(strings: &Strings, title: &str, body_class: &str, body: &str, script: &str) -> String {
+    // Only the full-window "centered" pages get the shell titlebar — the
+    // update window is a separate frameless window with its own chrome.
+    let (chrome, chrome_js) = if cfg!(windows) && body_class == "centered" {
+        (shell_titlebar_html(strings), SHELL_TITLEBAR_JS)
+    } else {
+        (String::new(), "")
+    };
+
     format!(
         r#"<!doctype html>
 <html lang="{lang}" dir="{dir}">
@@ -276,17 +348,19 @@ fn document(strings: &Strings, title: &str, body_class: &str, body: &str, script
 <title>{title}</title>
 <style>{css}</style>
 <body class="{body_class}">
-{body}
+{chrome}{body}
 </body>
-<script>{no_menu}{script}</script>
+<script>{no_menu}{chrome_js}{script}</script>
 </html>"#,
         lang = strings.html_lang(),
         dir = if strings.is_rtl() { "rtl" } else { "ltr" },
         title = escape_html(title),
         css = SHELL_CSS,
         body_class = body_class,
+        chrome = chrome,
         body = body,
         no_menu = no_context_menu_js(),
+        chrome_js = chrome_js,
         script = script,
     )
 }
@@ -559,7 +633,12 @@ const UPDATE_JS: &str = r#"
 /// app rather than part of this one), showed no download progress, and — because
 /// Win32 falls back to a plain `MessageBox` when it can't raise a TaskDialog —
 /// routinely rendered "Remind me later" as a bare `Cancel`.
-pub fn update_page_html(strings: &Strings, current: &str, next: &str, notes: Option<&str>) -> String {
+pub fn update_page_html(
+    strings: &Strings,
+    current: &str,
+    next: &str,
+    notes: Option<&str>,
+) -> String {
     let notes_body = notes
         .map(str::trim)
         .filter(|n| !n.is_empty())
@@ -716,7 +795,14 @@ const INIT_JS: &str = r#"
 /// The script injected into every page the main window loads, including the
 /// remote app.
 pub fn shell_init_js() -> String {
-    INIT_JS.replace("__DEBUG__", if cfg!(debug_assertions) { "true" } else { "false" })
+    INIT_JS.replace(
+        "__DEBUG__",
+        if cfg!(debug_assertions) {
+            "true"
+        } else {
+            "false"
+        },
+    )
 }
 
 #[cfg(test)]
@@ -784,6 +870,27 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_titlebar_appears_only_where_the_os_frame_is_gone() {
+        // The stylesheet (shared by every page) legitimately mentions the
+        // class — only the rendered <header> markup distinguishes the pages.
+        let welcome = holding_page_html(&strings(), false);
+        if cfg!(windows) {
+            // Frameless on Windows: the page must carry its own drag region
+            // and caption buttons.
+            assert!(welcome.contains(r#"class="app-titlebar""#));
+            assert!(welcome.contains("data-tauri-drag-region"));
+            assert!(welcome.contains("shell_window_control"));
+        } else {
+            assert!(!welcome.contains(r#"class="app-titlebar""#));
+        }
+
+        // The update window is its own frameless window with bespoke chrome —
+        // a second titlebar there would stack two headers.
+        let update = update_page_html(&strings(), "1.0.0", "1.1.0", None);
+        assert!(!update.contains(r#"class="app-titlebar""#));
+    }
+
+    #[test]
     fn interpolated_data_cannot_break_out_of_the_markup() {
         let html = update_page_html(
             &strings(),
@@ -810,10 +917,18 @@ mod tests {
     fn the_update_page_offers_all_three_choices() {
         let html = update_page_html(&strings(), "1.1.6", "1.0.20", None);
 
-        for id in ["id=\"install\"", "id=\"later\"", "id=\"skip\"", "id=\"close\""] {
+        for id in [
+            "id=\"install\"",
+            "id=\"later\"",
+            "id=\"skip\"",
+            "id=\"close\"",
+        ] {
             assert!(html.contains(id), "the update window must render {id}");
         }
-        assert!(html.contains("data-tauri-drag-region"), "frameless window must be draggable");
+        assert!(
+            html.contains("data-tauri-drag-region"),
+            "frameless window must be draggable"
+        );
         assert!(html.contains("1.1.6") && html.contains("1.0.20"));
     }
 
@@ -826,7 +941,10 @@ mod tests {
         // Zoom is pinned at 100% — the zoom combinations are swallowed, never
         // routed to a command.
         assert!(!js.contains("shell_zoom"), "zoom must stay locked at 100%");
-        assert!(!js.contains("__DEBUG__"), "the debug flag must be substituted");
+        assert!(
+            !js.contains("__DEBUG__"),
+            "the debug flag must be substituted"
+        );
     }
 
     #[test]
@@ -859,8 +977,17 @@ mod tests {
         // reload stays available on Ctrl+Shift+R.
         let js = shell_init_js();
 
-        assert!(js.contains("orcaa:refresh"), "must offer the app the event first");
-        assert!(js.contains("cancelable: true"), "the app signals it handled it by cancelling");
-        assert!(js.contains("shell_reload"), "and fall back to a real reload");
+        assert!(
+            js.contains("orcaa:refresh"),
+            "must offer the app the event first"
+        );
+        assert!(
+            js.contains("cancelable: true"),
+            "the app signals it handled it by cancelling"
+        );
+        assert!(
+            js.contains("shell_reload"),
+            "and fall back to a real reload"
+        );
     }
 }
