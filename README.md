@@ -223,25 +223,34 @@ where the plugin deliberately skips setting the app ID.
 
 ## Branded titlebar (custom window chrome)
 
-The stock OS frame is gone — the app wears Orcaa chrome, split per platform:
+The stock OS frame is gone and **the shell owns the replacement outright** — a titlebar strip
+injected by `TITLEBAR_JS` (part of the init script in `shell_page.rs`) into every page the main
+window shows: the remote app and the shell's own pages alike. One implementation, versioned with the
+shell binary, never with a web deploy.
 
-- **Windows** — the main window is frameless (`decorations(false)` + `shadow(true)`, which keeps the
-  resize borders and edge-snap). The web app's **topbar doubles as the titlebar**: the shared
-  `WindowControls` component draws minimize / maximize-restore / close at the topbar's end and calls
-  `shell_window_control`; empty topbar stretches carry `data-tauri-drag-region` (double-click there
-  toggles maximize via `core:window:allow-internal-toggle-maximize`). Close rides the normal
-  CloseRequested path, so hide-to-tray behaves exactly as before. The shell's own welcome/boot pages
-  draw their own slim titlebar (`shell_page.rs`, Windows-only, `centered` pages only — the update
-  window keeps its bespoke chrome). Known tradeoff: Win11's snap-layout hover on the maximize button
-  is lost; drag-to-edge and Win+arrows still work.
-- **macOS** — native traffic lights stay, floating over the page via `TitleBarStyle::Overlay` +
-  `hidden_title`. The web topbar pads around them (`html.orcaa-desktop-mac` root class →
-  `padding-left: 84px` in `shared/styles/layout/topbar.css`).
-- **Linux** — fully native frame. Undecorated GTK windows lose their resize edges, so frameless is
-  not worth it there.
+> ⚠️ A web-drawn titlebar (caption buttons rendered by the React topbar) was tried and **rejected**:
+> chrome rendered by the page can't know whether the running shell is frameless, so an older
+> installed shell plus a newer web build showed TWO sets of window buttons. Never move window chrome
+> back into the web apps.
 
-The web side detects the shell with `isTauri()` + a UA platform check — no config flows between the
-shell and the page.
+Per platform:
+
+- **Windows** — frameless (`decorations(false)` + `shadow(true)`, which keeps resize borders and
+  edge-snap). The strip draws minimize / maximize-restore / close (`shell_window_control`), a 12px
+  top-edge drag handle (double-click toggles maximize), and hides itself in fullscreen. Close rides
+  the normal CloseRequested path, so hide-to-tray behaves exactly as before. Known tradeoff: Win11's
+  snap-layout hover on the maximize button is lost; drag-to-edge and Win+arrows still work.
+- **macOS** — native traffic lights stay, floating over the strip's left edge via
+  `TitleBarStyle::Overlay` + `hidden_title`; the strip carries the drag edge and no buttons.
+- **Linux** — fully native frame, no strip. Undecorated GTK windows lose their resize edges.
+
+**Layout contract: none, deliberately.** The strip is a click-through overlay floating over the web
+app's own topbar row, so the caption buttons read as PART of the topbar (the approved, integrated
+look). It claims no layout inset — the page renders identically with or without the shell — and only
+the buttons plus the drag edge take pointer events, so everything underneath (the search bar
+included) stays clickable. Never set `--pwa-top-inset` from the strip: it would push the topbar down
+and strand the buttons in their own empty band. The maximize glyph and fullscreen state are polled
+from `shell_window_state` on DOM resize.
 
 ## POS Station (silent printing, cash drawer, kiosk)
 

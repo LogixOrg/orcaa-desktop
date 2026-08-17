@@ -9,7 +9,7 @@ The release workflow's `manifest` job reads the `## <version>` section verbatim;
 no entry → users see the generic "Improvements and fixes." line and CI emits a
 warning. Adding the entry is part of the version-bump checklist in the README.
 
-## 1.1.8
+## 1.2.0
 
 - POS Station: instant receipt printing with no print dialog on thermal
   printers (network or serial), automatic cash-drawer opening on cash sales,

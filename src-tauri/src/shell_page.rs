@@ -800,12 +800,13 @@ const INIT_JS: &str = r#"
 /// titlebar was tried and rejected: an older installed shell plus a newer web
 /// build rendered two sets of caption buttons.)
 ///
-/// Layout contract with the web app: the strip claims `--pwa-top-inset` on
-/// `<html>` — the app's own window-chrome inset variable (built for PWA
-/// window-controls-overlay, defined in `shared/styles/global.css` and consumed
-/// by the topbar/sidebar/panels) — so the page lays itself out below the strip
-/// without knowing the shell exists. Inline style beats the stylesheet's
-/// `:root` default, and nothing on the web side writes the property from JS.
+/// Layout contract with the web app: NONE, deliberately. The strip is a
+/// click-through overlay floating over the app's own topbar row (Tommy signed
+/// off on exactly this integrated look) — it claims no layout inset, so the
+/// page renders identically with or without the shell, and only the caption
+/// buttons plus a 12px top drag edge take pointer events. Do NOT set
+/// `--pwa-top-inset` here: it would push the topbar down and strand the
+/// buttons in their own empty band.
 ///
 /// Buttons are Windows-only (macOS keeps its native traffic lights over the
 /// strip's left edge; Linux keeps the whole native frame and gets no strip).
@@ -830,17 +831,24 @@ const TITLEBAR_JS: &str = r#"
     if (document.getElementById('orcaa-shell-titlebar')) return;
     const root = document.documentElement;
 
-    root.style.setProperty('--pwa-top-inset', HEIGHT + 'px');
-
+    // INTEGRATED overlay, Tommy-approved look: the strip floats over the
+    // app's own topbar row so the caption buttons read as part of it — the
+    // page is NOT pushed down (no layout-inset claim; an inset would banish
+    // the buttons to their own empty band above the topbar). The whole bar
+    // is click-through: only the buttons and a thin top drag edge take
+    // pointer events, so the search bar living underneath stays fully
+    // clickable.
     const bar = document.createElement('div');
     bar.id = 'orcaa-shell-titlebar';
-    bar.setAttribute('data-tauri-drag-region', '');
 
     const style = document.createElement('style');
     style.textContent =
       '#orcaa-shell-titlebar{position:fixed;top:0;left:0;right:0;height:' + HEIGHT + 'px;' +
       'display:flex;align-items:stretch;justify-content:flex-end;direction:ltr;' +
-      'z-index:2147483646;background:transparent;-webkit-user-select:none;user-select:none;}' +
+      'z-index:2147483646;background:transparent;pointer-events:none;' +
+      '-webkit-user-select:none;user-select:none;}' +
+      '#orcaa-shell-titlebar .drag-edge{position:absolute;top:0;left:0;height:12px;pointer-events:auto;}' +
+      '#orcaa-shell-titlebar .controls{display:flex;align-items:stretch;pointer-events:auto;}' +
       '#orcaa-shell-titlebar button{width:46px;border:0;background:transparent;padding:0;margin:0;' +
       'display:inline-flex;align-items:center;justify-content:center;cursor:default;' +
       'color:#8a94a6;outline:none;font:inherit;}' +
@@ -858,6 +866,9 @@ const TITLEBAR_JS: &str = r#"
       return b;
     };
 
+    const controls = document.createElement('div');
+    controls.className = 'controls';
+
     let maxBtn = null;
     if (WITH_BUTTONS) {
       const minBtn = button('', __MIN__, SVG_MIN);
@@ -869,24 +880,30 @@ const TITLEBAR_JS: &str = r#"
       const closeBtn = button('close', __CLOSE__, SVG_CLOSE);
       closeBtn.addEventListener('click', () =>
         invoke('shell_window_control', { action: 'close' }));
-      bar.appendChild(minBtn);
-      bar.appendChild(maxBtn);
-      bar.appendChild(closeBtn);
+      controls.appendChild(minBtn);
+      controls.appendChild(maxBtn);
+      controls.appendChild(closeBtn);
     }
+    bar.appendChild(controls);
 
-    // Double-click on the empty strip toggles maximize, like a real titlebar.
-    // Guarded to the strip itself so the caption buttons stay single-purpose.
-    bar.addEventListener('dblclick', (e) => {
-      if (e.target === bar) invoke('shell_window_control', { action: 'toggle-maximize' });
-    });
+    // A thin top-edge drag handle (stops short of the buttons). 12px keeps
+    // the app's topbar clickable while still giving the window a grab bar —
+    // the same top-edge affordance other frameless apps use.
+    const dragEdge = document.createElement('div');
+    dragEdge.className = 'drag-edge';
+    dragEdge.setAttribute('data-tauri-drag-region', '');
+    dragEdge.style.right = (WITH_BUTTONS ? 46 * 3 : 0) + 'px';
+    dragEdge.addEventListener('dblclick', () =>
+      invoke('shell_window_control', { action: 'toggle-maximize' }));
+    bar.appendChild(dragEdge);
 
     // Appended to <html>, not <body>: the app owns and may replace the body's
     // subtree, the strip must outlive that.
     root.appendChild(bar);
 
-    // Maximized state picks the glyph; fullscreen (F11) retires the strip and
-    // returns its inset to the page. Geometry changes always reach the webview
-    // as a DOM resize, so that is the one signal needed.
+    // Maximized state picks the glyph; fullscreen (F11) retires the strip.
+    // Geometry changes always reach the webview as a DOM resize, so that is
+    // the one signal needed.
     let timer = 0;
     const sync = () => {
       invoke('shell_window_state').then((state) => {
@@ -897,9 +914,7 @@ const TITLEBAR_JS: &str = r#"
           maxBtn.title = label;
           maxBtn.setAttribute('aria-label', label);
         }
-        const fullscreen = s.fullscreen === true;
-        bar.style.display = fullscreen ? 'none' : 'flex';
-        root.style.setProperty('--pwa-top-inset', fullscreen ? '0px' : HEIGHT + 'px');
+        bar.style.display = s.fullscreen === true ? 'none' : 'flex';
       }).catch(() => {});
     };
     window.addEventListener('resize', () => {
@@ -1024,9 +1039,12 @@ mod tests {
         let js = shell_init_js(&strings());
         if cfg!(any(windows, target_os = "macos")) {
             assert!(js.contains("orcaa-shell-titlebar"));
-            // The strip claims the app's own window-chrome inset variable so
-            // the page lays out below it.
-            assert!(js.contains("--pwa-top-inset"));
+            // Integrated overlay contract: click-through everywhere except
+            // the buttons/drag edge, and NO layout inset — claiming
+            // --pwa-top-inset would push the topbar down and un-integrate
+            // the buttons (regression Tommy explicitly rejected).
+            assert!(js.contains("pointer-events:none"));
+            assert!(!js.contains("--pwa-top-inset"));
         }
         if cfg!(windows) {
             assert!(js.contains("shell_window_control"));
