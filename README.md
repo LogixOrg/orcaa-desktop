@@ -268,9 +268,11 @@ All five commands are grouped under the `allow-shell-pos` app permission (remote
 
 ## Native presence
 
-- **First-run autostart offer** — one localized dialog on first launch ("Start with your
-  computer?"), skipped when launched `--hidden` or already enabled; accepting flips the same
-  autostart the tray checkbox controls (and syncs the checkbox). Asked exactly once.
+- **First-run autostart offer** — a **branded shell window** on first launch ("Start with your
+  computer?"), wearing the same chrome as the update prompt (never the OS's stock message box);
+  skipped when launched `--hidden` or already enabled; accepting flips the same autostart the tray
+  checkbox controls (and syncs the checkbox through managed state). Asked exactly once. Window
+  label `autostart` — listed in `default.json`'s `windows` with `allow-autostart-prompt`.
 - **Unread badge** — `shell_badge(count)` mirrors the web bell's unread count onto the taskbar
   (Windows: red-dot overlay drawn in code) or dock (macOS/Linux: numeric badge). Wired from both
   AppTopbars via `useDesktopBadge`; zero (and sign-out) clears it.

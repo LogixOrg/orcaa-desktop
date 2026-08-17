@@ -24,8 +24,8 @@ use url::Url;
 
 use crate::i18n::Strings;
 use crate::shell_page::{
-    holding_page_html, loading_page_html, shell_init_js, shell_url, update_page_html, ShellPage,
-    SHELL_SCHEME,
+    autostart_prompt_page_html, holding_page_html, loading_page_html, shell_init_js, shell_url,
+    update_page_html, ShellPage, SHELL_SCHEME,
 };
 use crate::signin::PendingSignIn;
 use crate::updater::PendingUpdate;
@@ -529,6 +529,101 @@ fn shell_window_state(window: WebviewWindow) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
+// First-run autostart offer — a branded window, never the OS message box
+// ---------------------------------------------------------------------------
+
+const AUTOSTART_WINDOW: &str = "autostart";
+
+/// Tray checkbox handle, managed so the offer window's commands can keep the
+/// menu in step with what they just changed.
+struct AutostartMenuItem(CheckMenuItem<tauri::Wry>);
+
+fn autostart_window_builder(
+    app: &AppHandle,
+    title: String,
+) -> tauri::WebviewWindowBuilder<'_, tauri::Wry, AppHandle> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        AUTOSTART_WINDOW,
+        tauri::WebviewUrl::CustomProtocol(shell_url(&ShellPage::AutostartPrompt, false)),
+    )
+    .title(title)
+    .inner_size(460.0, 330.0)
+    .resizable(false)
+    .minimizable(false)
+    .maximizable(false)
+    .decorations(false)
+    .shadow(true)
+    .skip_taskbar(true)
+    .focused(true)
+    // Revealed on first paint, same as the update window — no white flash.
+    .visible(false)
+    .on_page_load(|window, payload| {
+        if matches!(payload.event(), PageLoadEvent::Finished) {
+            updater::center_on_main(&window.app_handle().clone(), &window);
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    })
+}
+
+fn open_autostart_prompt(app: &AppHandle) {
+    if app.get_webview_window(AUTOSTART_WINDOW).is_some() {
+        return;
+    }
+
+    let title = app
+        .config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| "Orcaa".into());
+
+    // Parent to the main window when possible (updater pattern); an
+    // unparented offer is still far better than none.
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+        match autostart_window_builder(app, title.clone()).parent(&main) {
+            Ok(builder) => {
+                if let Err(err) = builder.build() {
+                    log::warn!("failed to open the autostart offer: {err}");
+                }
+                return;
+            }
+            Err(err) => {
+                log::warn!("could not parent the autostart offer, opening it standalone: {err}")
+            }
+        }
+    }
+
+    if let Err(err) = autostart_window_builder(app, title).build() {
+        log::warn!("failed to open the autostart offer: {err}");
+    }
+}
+
+fn close_autostart_prompt(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(AUTOSTART_WINDOW) {
+        let _ = window.close();
+    }
+}
+
+#[tauri::command]
+fn autostart_accept(app: AppHandle) {
+    let manager = app.autolaunch();
+    if let Err(err) = manager.enable() {
+        log::error!("failed to enable autostart from the offer: {err}");
+    }
+    // The tray checkbox is the permanent control — keep it truthful.
+    if let Some(item) = app.try_state::<AutostartMenuItem>() {
+        let _ = item.0.set_checked(manager.is_enabled().unwrap_or(false));
+    }
+    close_autostart_prompt(&app);
+}
+
+#[tauri::command]
+fn autostart_decline(app: AppHandle) {
+    close_autostart_prompt(&app);
+}
+
+// ---------------------------------------------------------------------------
 // Unread badge
 // ---------------------------------------------------------------------------
 
@@ -707,6 +802,7 @@ pub fn run() {
                     // the welcome page rather than an empty update prompt.
                     None => holding_page_html(&strings, false),
                 },
+                ShellPage::AutostartPrompt => autostart_prompt_page_html(&strings),
             };
 
             // The config-level `app.security.csp` never reaches these pages —
@@ -779,6 +875,8 @@ pub fn run() {
             shell_window_control,
             shell_window_state,
             shell_badge,
+            autostart_accept,
+            autostart_decline,
             print::shell_pos_print,
             print::shell_pos_test_print,
             print::shell_pos_drawer_kick,
@@ -887,7 +985,7 @@ pub fn run() {
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                  --autoplay-policy=no-user-gesture-required",
             )
-            .initialization_script(shell_init_js())
+            .initialization_script(shell_init_js(&strings))
             .on_download(|webview, event| on_download_event(&webview.app_handle().clone(), event))
             .on_navigation(move |url| {
                 // Logging out, or a session expiring, lands here. Show the
@@ -1078,10 +1176,10 @@ pub fn run() {
                 ],
             )?;
 
-            // The first-run autostart prompt (below) flips this checkbox from
-            // its dialog callback — clone the handle before the menu-event
+            // The branded first-run offer's accept command flips this checkbox
+            // — hand it a clone through managed state before the menu-event
             // closure consumes the original.
-            let autostart_item_for_prompt = autostart_item.clone();
+            app.manage(AutostartMenuItem(autostart_item.clone()));
 
             let menu_strings = strings.clone();
             // Product name only — no version. The hover tooltip is a brand
@@ -1148,12 +1246,11 @@ pub fn run() {
 
             tray_builder.build(app)?;
 
-            // One-time autostart offer. Hide-to-tray keeps notifications alive
-            // only while the process exists — starting with the OS is what
-            // closes that gap for people who don't open the app first thing.
-            // Asked once; the tray checkbox stays the permanent control either
-            // way. Skipped when launched `--hidden` (autostart already did its
-            // job) or when autostart is already on.
+            // One-time autostart offer — a BRANDED shell window (same chrome
+            // as the update prompt), never the OS's stock message box. Asked
+            // once; the tray checkbox stays the permanent control either way.
+            // Skipped when launched `--hidden` (autostart already did its job)
+            // or when autostart is already on.
             {
                 let launched_hidden = std::env::args().any(|arg| arg == "--hidden");
                 let already_enabled = app.autolaunch().is_enabled().unwrap_or(false);
@@ -1167,30 +1264,7 @@ pub fn run() {
                             store.set(STORE_KEY_AUTOSTART_ASKED, json!(true));
                             let _ = store.save();
 
-                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                            let prompt_handle = app.handle().clone();
-                            app.dialog()
-                                .message(strings.autostart_prompt_body())
-                                .title(strings.autostart_prompt_title())
-                                .buttons(MessageDialogButtons::OkCancelCustom(
-                                    // Reuses the tray label so the prompt and
-                                    // the checkbox speak identically.
-                                    strings.tray_autostart(),
-                                    strings.autostart_prompt_not_now(),
-                                ))
-                                .show(move |accepted| {
-                                    if !accepted {
-                                        return;
-                                    }
-                                    let manager = prompt_handle.autolaunch();
-                                    if let Err(err) = manager.enable() {
-                                        log::error!(
-                                            "failed to enable autostart from the prompt: {err}"
-                                        );
-                                    }
-                                    let _ = autostart_item_for_prompt
-                                        .set_checked(manager.is_enabled().unwrap_or(false));
-                                });
+                            open_autostart_prompt(app.handle());
                         }
                     }
                 }

@@ -96,6 +96,15 @@ commands.allow = [
 ]
 
 [[permission]]
+identifier = "allow-autostart-prompt"
+description = """
+The branded first-run autostart offer's two choices. Local only — the page is
+served by the shell in its own frameless window (same chrome as the update
+prompt); the hosted app has no business toggling autostart.
+"""
+commands.allow = ["autostart_accept", "autostart_decline"]
+
+[[permission]]
 identifier = "allow-updater-window"
 description = """
 The three choices the update window offers: install now, remind me later, and

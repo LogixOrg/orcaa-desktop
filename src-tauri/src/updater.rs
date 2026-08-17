@@ -175,7 +175,7 @@ pub async fn check_for_updates(app: AppHandle, strings: Strings, interactive: bo
 /// makes it read as part of the app instead of a stray dialog. Clamped through
 /// the same work-area helper the main window uses, so a main window sitting near
 /// a screen edge can't push this one off it.
-fn center_on_main(app: &AppHandle, window: &tauri::WebviewWindow) {
+pub(crate) fn center_on_main(app: &AppHandle, window: &tauri::WebviewWindow) {
     let Some(main) = app.get_webview_window("main") else {
         let _ = window.center();
         return;
