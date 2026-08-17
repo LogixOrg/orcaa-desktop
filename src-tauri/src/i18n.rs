@@ -93,10 +93,6 @@ impl Strings {
         self.pick("Maximize", "تكبير")
     }
 
-    pub fn window_restore(&self) -> String {
-        self.pick("Restore", "استعادة")
-    }
-
     pub fn window_close(&self) -> String {
         self.pick("Close", "إغلاق")
     }

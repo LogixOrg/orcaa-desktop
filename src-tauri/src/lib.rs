@@ -870,7 +870,7 @@ pub fn run() {
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                  --autoplay-policy=no-user-gesture-required",
             )
-            .initialization_script(shell_init_js(&strings))
+            .initialization_script(shell_init_js())
             .on_download(|webview, event| on_download_event(&webview.app_handle().clone(), event))
             .on_navigation(move |url| {
                 // Logging out, or a session expiring, lands here. Show the
