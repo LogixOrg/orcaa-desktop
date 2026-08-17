@@ -1,6 +1,6 @@
 [package]
 name = "orcaa-desktop"
-version = "1.1.7"
+version = "1.1.8"
 description = "Orcaa desktop wrapper (Business + Admin)"
 authors = ["Orcaa"]
 edition = "2021"
@@ -38,6 +38,11 @@ base64 = "0.22"
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
+# POS receipt printing: raw ESC/POS over TCP:9100 or a serial COM port.
+# The byte protocol is hand-rolled in print.rs — these are only transport
+# (serialport) and text encoding (encoding_rs: cp1256 Arabic / cp437 latin).
+serialport = "4"
+encoding_rs = "0.8"
 
 [profile.release]
 panic = "abort"

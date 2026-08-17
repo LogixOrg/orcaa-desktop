@@ -28,7 +28,8 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libxdo-dev \
-            libssl-dev
+            libssl-dev \
+            libudev-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

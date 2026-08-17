@@ -9,8 +9,15 @@ The release workflow's `manifest` job reads the `## <version>` section verbatim;
 no entry → users see the generic "Improvements and fixes." line and CI emits a
 warning. Adding the entry is part of the version-bump checklist in the README.
 
-## 1.1.7
+## 1.1.8
 
+- POS Station: instant receipt printing with no print dialog on thermal
+  printers (network or serial), automatic cash-drawer opening on cash sales,
+  and a printer test page — set it up in Point of Sale settings.
+- Kiosk mode for counter PCs: launch with --kiosk and the app starts
+  fullscreen, ready for the register.
+- A one-time offer to start Orcaa with your computer, so notifications reach
+  you all day.
 - A branded Orcaa titlebar: the app's own top bar now doubles as the window
   titlebar on Windows, with the window buttons built in — no more generic
   system frame. On Mac the familiar traffic lights stay.

@@ -20,6 +20,7 @@
     "allow-shell-notify",
     "allow-shell-window",
     "allow-shell-badge",
+    "allow-shell-pos",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     {

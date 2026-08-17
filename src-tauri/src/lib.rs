@@ -1,5 +1,6 @@
 mod i18n;
 mod notify;
+mod print;
 mod shell_page;
 mod signin;
 mod updater;
@@ -32,6 +33,7 @@ use crate::updater::PendingUpdate;
 pub(crate) const STORE_FILE: &str = "orcaa-desktop.json";
 const STORE_KEY_LAST_URL: &str = "last_url";
 const STORE_KEY_TRAY_HINT_SEEN: &str = "tray_hint_seen";
+const STORE_KEY_AUTOSTART_ASKED: &str = "autostart_prompt_seen";
 /// Legacy — zoom is pinned at 100% now. The key survives only so setup can
 /// delete whatever level a pre-lock version persisted.
 const STORE_KEY_ZOOM: &str = "zoom_level";
@@ -665,6 +667,16 @@ fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, _path: std::path
 // ---------------------------------------------------------------------------
 
 pub fn run() {
+    // Release builds abort on panic (`panic = "abort"`), and the default hook
+    // prints to a stderr nobody sees on a double-clicked Windows app. Leave a
+    // trace in the log file first, or a crash at a customer's counter is
+    // invisible. Registered before the builder so even setup panics are
+    // caught; if the log plugin isn't up yet the record is simply dropped —
+    // no worse than before.
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("PANIC (shell is about to abort): {info}");
+    }));
+
     tauri::Builder::default()
         // Serves the shell's own pages. Everything they need is derived from
         // config or managed state here rather than carried in the URL, so a
@@ -767,6 +779,11 @@ pub fn run() {
             shell_window_control,
             shell_window_state,
             shell_badge,
+            print::shell_pos_print,
+            print::shell_pos_test_print,
+            print::shell_pos_drawer_kick,
+            print::shell_pos_printer_get,
+            print::shell_pos_printer_set,
             notify::shell_notify,
             updater::update_install,
             updater::update_snooze,
@@ -939,6 +956,14 @@ pub fn run() {
             // this sees the geometry the user is actually about to get.
             clamp_window_to_work_area(&window);
 
+            // Kiosk / station mode: a counter PC that boots straight into a
+            // fullscreen Orcaa (pair with autostart). Fullscreen also retires
+            // the injected titlebar strip, so the page owns every pixel. Exit
+            // stays where it always was — the tray's Quit.
+            if std::env::args().any(|arg| arg == "--kiosk") {
+                let _ = window.set_fullscreen(true);
+            }
+
             // The browser hands the finished session back here.
             let deep_link_handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -1053,6 +1078,11 @@ pub fn run() {
                 ],
             )?;
 
+            // The first-run autostart prompt (below) flips this checkbox from
+            // its dialog callback — clone the handle before the menu-event
+            // closure consumes the original.
+            let autostart_item_for_prompt = autostart_item.clone();
+
             let menu_strings = strings.clone();
             // Product name only — no version. The hover tooltip is a brand
             // surface, not a diagnostic one; the version lives in the startup
@@ -1117,6 +1147,54 @@ pub fn run() {
             }
 
             tray_builder.build(app)?;
+
+            // One-time autostart offer. Hide-to-tray keeps notifications alive
+            // only while the process exists — starting with the OS is what
+            // closes that gap for people who don't open the app first thing.
+            // Asked once; the tray checkbox stays the permanent control either
+            // way. Skipped when launched `--hidden` (autostart already did its
+            // job) or when autostart is already on.
+            {
+                let launched_hidden = std::env::args().any(|arg| arg == "--hidden");
+                let already_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+                if !launched_hidden && !already_enabled {
+                    if let Ok(store) = app.store(STORE_FILE) {
+                        let asked = store
+                            .get(STORE_KEY_AUTOSTART_ASKED)
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if !asked {
+                            store.set(STORE_KEY_AUTOSTART_ASKED, json!(true));
+                            let _ = store.save();
+
+                            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+                            let prompt_handle = app.handle().clone();
+                            app.dialog()
+                                .message(strings.autostart_prompt_body())
+                                .title(strings.autostart_prompt_title())
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    // Reuses the tray label so the prompt and
+                                    // the checkbox speak identically.
+                                    strings.tray_autostart(),
+                                    strings.autostart_prompt_not_now(),
+                                ))
+                                .show(move |accepted| {
+                                    if !accepted {
+                                        return;
+                                    }
+                                    let manager = prompt_handle.autolaunch();
+                                    if let Err(err) = manager.enable() {
+                                        log::error!(
+                                            "failed to enable autostart from the prompt: {err}"
+                                        );
+                                    }
+                                    let _ = autostart_item_for_prompt
+                                        .set_checked(manager.is_enabled().unwrap_or(false));
+                                });
+                        }
+                    }
+                }
+            }
 
             let update_handle = app.handle().clone();
             let update_strings = strings.clone();

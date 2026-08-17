@@ -199,6 +199,7 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
+            libudev-dev \
             patchelf \
             file
 

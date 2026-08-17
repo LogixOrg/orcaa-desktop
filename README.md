@@ -243,8 +243,34 @@ The stock OS frame is gone — the app wears Orcaa chrome, split per platform:
 The web side detects the shell with `isTauri()` + a UA platform check — no config flows between the
 shell and the page.
 
+## POS Station (silent printing, cash drawer, kiosk)
+
+The desktop app's reason-to-install for retail counters — capabilities a browser tab can never have:
+
+- **Silent ESC/POS receipt printing** (`shell_pos_print`) — the POS page sends a semantic op list
+  (`text` / `pair` / `hr` / `qr` / `cut` / `drawer`); `src/print.rs` hand-encodes ESC/POS bytes and
+  writes them straight to the printer over **TCP:9100** or a **serial COM port**. No driver, no
+  spooler, no dialog. Payload capped at 400 ops; 4s wire timeout.
+- **Cash drawer kick** — rides the receipt (`drawer` op) or fires alone (`shell_pos_drawer_kick`,
+  "no sale"), and only when the saved config's `drawer_kick` is on.
+- **Printer config** (`shell_pos_printer_get`/`set`) — interface, address, width (32/58mm ·
+  48/80mm), `ESC t` codepage slot, text encoding (`cp1256` Arabic / `cp437` / `ascii`), drawer
+  toggle. Persisted in the shell's store per machine — per STATION, which is exactly right for
+  counter hardware. Validated on save so a broken config can't be persisted.
+- **Test page** (`shell_pos_test_print`) — layout + an Arabic line + a QR in one print.
+  **Arabic shaping is printer-firmware dependent** (many thermal printers shape/reorder cp1256
+  on-printer; some don't) — the test page is how you find out for the hardware in front of you.
+  Deliberately never kicks the drawer.
+- **Kiosk / station mode** — launch with `--kiosk`: starts fullscreen (the titlebar strip retires
+  itself), pairs with autostart so a counter PC boots straight into POS. Exit via tray Quit.
+
+All five commands are grouped under the `allow-shell-pos` app permission (remote + local).
+
 ## Native presence
 
+- **First-run autostart offer** — one localized dialog on first launch ("Start with your
+  computer?"), skipped when launched `--hidden` or already enabled; accepting flips the same
+  autostart the tray checkbox controls (and syncs the checkbox). Asked exactly once.
 - **Unread badge** — `shell_badge(count)` mirrors the web bell's unread count onto the taskbar
   (Windows: red-dot overlay drawn in code) or dock (macOS/Linux: numeric badge). Wired from both
   AppTopbars via `useDesktopBadge`; zero (and sign-out) clears it.
@@ -543,5 +569,7 @@ The GitHub Actions workflow uploads stable-name copies of the versioned installe
 - **Code signing + notarization (macOS)** — Apple Developer Program ($99/yr). Secrets-only setup, already wired in the workflow (see "Apple signing + notarization" above). Removes Gatekeeper warnings.
 - **Camera / microphone permission** — `wry` registers a WebView2 `PermissionRequested` handler **only** when clipboard access is enabled, and even then only auto-allows clipboard-read (`wry/src/webview2/mod.rs:500`); there is no public API for the rest. Mic and camera therefore fall through to WebView2's own prompt, which Chromium persists per origin — so it should ask once and then remember. **Unverified in a real build**: if voice calls or the QR scanner turn out to re-prompt or fail, the options are `--use-fake-ui-for-media-stream` (auto-grants for *every* origin in the webview — not acceptable) or an upstream `wry` change.
 - **Custom user agent** — deliberately _not_ set. `user_agent()` replaces the UA string wholesale, and the tenant subdomains sit behind Cloudflare, where a non-standard UA risks bot challenges. The PWA already identifies the shell via `__TAURI_INTERNALS__`; if the backend needs to know, send a header instead.
-- **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push.
+- **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push. Mitigated by the first-run autostart offer.
+- **Inline reply on chat toasts** — `tauri-winrt-notification` exposes no text-input API (buttons only); doing this needs hand-built toast XML or an upstream PR. Parked until then.
+- **USB / Windows-driver receipt printers** — `print.rs` speaks TCP:9100 and serial COM. Pure-USB printers without a virtual COM port need winspool RAW printing; add if a real customer hits it.
 - **Push when truly quit** (see above) is the remaining notification gap — chat, voice calls and click-to-navigate are all wired now.

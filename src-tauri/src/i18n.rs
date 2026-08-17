@@ -248,6 +248,29 @@ impl Strings {
         }
     }
 
+    // ---- First-run autostart offer -------------------------------------
+
+    pub fn autostart_prompt_title(&self) -> String {
+        self.pick("Start with your computer?", "التشغيل مع بدء تشغيل جهازك؟")
+    }
+
+    pub fn autostart_prompt_body(&self) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "Let {} start when you sign in — tucked away in the tray — so bookings, messages and calls reach you all day. You can change this anytime from the tray icon.",
+                self.product
+            ),
+            Lang::Ar => format!(
+                "اسمح لـ {} بالبدء عند تسجيل دخولك — في شريط النظام — لتصلك الحجوزات والرسائل والمكالمات طوال اليوم. يمكنك تغيير ذلك في أي وقت من أيقونة شريط النظام.",
+                self.product
+            ),
+        }
+    }
+
+    pub fn autostart_prompt_not_now(&self) -> String {
+        self.pick("Not now", "ليس الآن")
+    }
+
     // ---- Updater ------------------------------------------------------
 
     // ---- Update prompt (asks before installing) -----------------------

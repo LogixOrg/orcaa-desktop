@@ -76,6 +76,26 @@ count is the only input and it draws nothing but the badge.
 commands.allow = ["shell_badge"]
 
 [[permission]]
+identifier = "allow-shell-pos"
+description = """
+The POS station: silent ESC/POS receipt printing, cash-drawer kick, printer
+config and a test page.
+
+The printer is reached directly (TCP:9100 or a serial port) with bytes built
+in Rust from a semantic op list — the page never supplies raw device bytes,
+the drawer only fires when the saved config allows it, and nothing here can
+read anything back. Printing is the whole point of granting this to the
+hosted POS page.
+"""
+commands.allow = [
+  "shell_pos_print",
+  "shell_pos_test_print",
+  "shell_pos_drawer_kick",
+  "shell_pos_printer_get",
+  "shell_pos_printer_set",
+]
+
+[[permission]]
 identifier = "allow-updater-window"
 description = """
 The three choices the update window offers: install now, remind me later, and
