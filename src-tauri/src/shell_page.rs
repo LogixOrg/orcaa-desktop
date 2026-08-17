@@ -186,23 +186,6 @@ button.link {
 button.link:hover { color: var(--text); }
 .cta:focus-visible, button:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
 
-/* --- frameless-window titlebar (Windows-only, "centered" pages) ---------- */
-.app-titlebar {
-  position: fixed; top: 0; left: 0; right: 0; height: 2.5rem;
-  display: flex; align-items: center; justify-content: flex-end;
-  /* Caption buttons stay top-right even in Arabic — Windows convention. */
-  direction: ltr;
-  z-index: 10;
-}
-.app-titlebar .controls { display: flex; height: 100%; }
-.app-titlebar .controls button {
-  width: 3.3rem; height: 100%; border: 0; background: none; cursor: default;
-  color: var(--text-soft);
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.app-titlebar .controls button:hover { background: var(--track); color: var(--text); }
-.app-titlebar .controls button:last-child:hover { background: var(--danger); color: #fff; }
-
 /* --- spinner ------------------------------------------------------------- */
 .spinner {
   width: 1.75rem; height: 1.75rem; margin: 0 auto 1.5rem;
@@ -290,57 +273,15 @@ fn no_context_menu_js() -> String {
     )
 }
 
-/// The caption buttons for the shell's own pages, drawn only on Windows where
-/// the main window has no OS frame. The glyphs are inline strokes, not text —
-/// Segoe's caption characters aren't in every font fallback chain.
-fn shell_titlebar_html(strings: &Strings) -> String {
-    format!(
-        r#"<header class="app-titlebar" data-tauri-drag-region>
-  <div class="controls">
-    <button id="win-min" type="button" aria-label="{min}" title="{min}">
-      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor"/></svg>
-    </button>
-    <button id="win-max" type="button" aria-label="{max}" title="{max}">
-      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>
-    </button>
-    <button id="win-close" type="button" aria-label="{close}" title="{close}">
-      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg>
-    </button>
-  </div>
-</header>"#,
-        min = escape_html(&strings.window_minimize()),
-        max = escape_html(&strings.window_maximize()),
-        close = escape_html(&strings.window_close()),
-    )
-}
-
-/// Wires the caption buttons to `shell_window_control`. Close rides the same
-/// CloseRequested path as the native X did, so hide-to-tray still applies.
-const SHELL_TITLEBAR_JS: &str = r#"
-(() => {
-  const control = (action) =>
-    window.__TAURI_INTERNALS__.invoke('shell_window_control', { action });
-  const bind = (id, action) => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('click', () => control(action));
-  };
-  bind('win-min', 'minimize');
-  bind('win-max', 'toggle-maximize');
-  bind('win-close', 'close');
-})();
-"#;
-
 /// Wraps a body in the shared document shell. Every shell page goes through
 /// here so `lang`/`dir` and the stylesheet can never drift apart between pages.
+///
+/// Note the shell pages carry no window chrome of their own — the injected
+/// titlebar strip (see `TITLEBAR_JS`) runs on these pages exactly as it does
+/// on the remote app, so there is ONE titlebar implementation, owned by the
+/// shell, everywhere. (The update window is a separate webview that never
+/// receives the init script; it keeps its bespoke `.titlebar` chrome.)
 fn document(strings: &Strings, title: &str, body_class: &str, body: &str, script: &str) -> String {
-    // Only the full-window "centered" pages get the shell titlebar — the
-    // update window is a separate frameless window with its own chrome.
-    let (chrome, chrome_js) = if cfg!(windows) && body_class == "centered" {
-        (shell_titlebar_html(strings), SHELL_TITLEBAR_JS)
-    } else {
-        (String::new(), "")
-    };
-
     format!(
         r#"<!doctype html>
 <html lang="{lang}" dir="{dir}">
@@ -348,19 +289,17 @@ fn document(strings: &Strings, title: &str, body_class: &str, body: &str, script
 <title>{title}</title>
 <style>{css}</style>
 <body class="{body_class}">
-{chrome}{body}
+{body}
 </body>
-<script>{no_menu}{chrome_js}{script}</script>
+<script>{no_menu}{script}</script>
 </html>"#,
         lang = strings.html_lang(),
         dir = if strings.is_rtl() { "rtl" } else { "ltr" },
         title = escape_html(title),
         css = SHELL_CSS,
         body_class = body_class,
-        chrome = chrome,
         body = body,
         no_menu = no_context_menu_js(),
-        chrome_js = chrome_js,
         script = script,
     )
 }
@@ -792,17 +731,162 @@ const INIT_JS: &str = r#"
 })();
 "#;
 
+/// The shell-owned titlebar strip.
+///
+/// Injected into every page the MAIN window shows — the remote app and the
+/// shell's own pages alike — so window chrome has exactly one implementation
+/// and it ships with the shell binary, never with a web deploy. (A web-drawn
+/// titlebar was tried and rejected: an older installed shell plus a newer web
+/// build rendered two sets of caption buttons.)
+///
+/// Layout contract with the web app: the strip claims `--pwa-top-inset` on
+/// `<html>` — the app's own window-chrome inset variable (built for PWA
+/// window-controls-overlay, defined in `shared/styles/global.css` and consumed
+/// by the topbar/sidebar/panels) — so the page lays itself out below the strip
+/// without knowing the shell exists. Inline style beats the stylesheet's
+/// `:root` default, and nothing on the web side writes the property from JS.
+///
+/// Buttons are Windows-only (macOS keeps its native traffic lights over the
+/// strip's left edge; Linux keeps the whole native frame and gets no strip).
+/// The greys are deliberate hardcodes: the strip floats over arbitrary app
+/// surfaces in either theme, and the close-hover red is the Windows caption
+/// convention, not a brand colour.
+const TITLEBAR_JS: &str = r#"
+(() => {
+  const WITH_BUTTONS = __WITH_BUTTONS__;
+  if (!WITH_BUTTONS && !__MAC_OVERLAY__) return;
+
+  const HEIGHT = 40;
+  const invoke = (cmd, args) =>
+    window.__TAURI_INTERNALS__.invoke(cmd, args || {});
+
+  const SVG_MIN = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor"/></svg>';
+  const SVG_MAX = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
+  const SVG_RESTORE = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 2.5V0.5h7v7H7.5" fill="none" stroke="currentColor"/><rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor"/></svg>';
+  const SVG_CLOSE = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg>';
+
+  const mount = () => {
+    if (document.getElementById('orcaa-shell-titlebar')) return;
+    const root = document.documentElement;
+
+    root.style.setProperty('--pwa-top-inset', HEIGHT + 'px');
+
+    const bar = document.createElement('div');
+    bar.id = 'orcaa-shell-titlebar';
+    bar.setAttribute('data-tauri-drag-region', '');
+
+    const style = document.createElement('style');
+    style.textContent =
+      '#orcaa-shell-titlebar{position:fixed;top:0;left:0;right:0;height:' + HEIGHT + 'px;' +
+      'display:flex;align-items:stretch;justify-content:flex-end;direction:ltr;' +
+      'z-index:2147483646;background:transparent;-webkit-user-select:none;user-select:none;}' +
+      '#orcaa-shell-titlebar button{width:46px;border:0;background:transparent;padding:0;margin:0;' +
+      'display:inline-flex;align-items:center;justify-content:center;cursor:default;' +
+      'color:#8a94a6;outline:none;font:inherit;}' +
+      '#orcaa-shell-titlebar button:hover{background:rgba(128,134,148,0.18);}' +
+      '#orcaa-shell-titlebar button.close:hover{background:#e81123;color:#fff;}';
+    bar.appendChild(style);
+
+    const button = (cls, label, svg) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      if (cls) b.className = cls;
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.innerHTML = svg;
+      return b;
+    };
+
+    let maxBtn = null;
+    if (WITH_BUTTONS) {
+      const minBtn = button('', __MIN__, SVG_MIN);
+      minBtn.addEventListener('click', () =>
+        invoke('shell_window_control', { action: 'minimize' }));
+      maxBtn = button('', __MAX__, SVG_MAX);
+      maxBtn.addEventListener('click', () =>
+        invoke('shell_window_control', { action: 'toggle-maximize' }));
+      const closeBtn = button('close', __CLOSE__, SVG_CLOSE);
+      closeBtn.addEventListener('click', () =>
+        invoke('shell_window_control', { action: 'close' }));
+      bar.appendChild(minBtn);
+      bar.appendChild(maxBtn);
+      bar.appendChild(closeBtn);
+    }
+
+    // Double-click on the empty strip toggles maximize, like a real titlebar.
+    // Guarded to the strip itself so the caption buttons stay single-purpose.
+    bar.addEventListener('dblclick', (e) => {
+      if (e.target === bar) invoke('shell_window_control', { action: 'toggle-maximize' });
+    });
+
+    // Appended to <html>, not <body>: the app owns and may replace the body's
+    // subtree, the strip must outlive that.
+    root.appendChild(bar);
+
+    // Maximized state picks the glyph; fullscreen (F11) retires the strip and
+    // returns its inset to the page. Geometry changes always reach the webview
+    // as a DOM resize, so that is the one signal needed.
+    let timer = 0;
+    const sync = () => {
+      invoke('shell_window_state').then((state) => {
+        const s = state || {};
+        if (maxBtn) {
+          maxBtn.innerHTML = s.maximized ? SVG_RESTORE : SVG_MAX;
+          const label = s.maximized ? __RESTORE__ : __MAX__;
+          maxBtn.title = label;
+          maxBtn.setAttribute('aria-label', label);
+        }
+        const fullscreen = s.fullscreen === true;
+        bar.style.display = fullscreen ? 'none' : 'flex';
+        root.style.setProperty('--pwa-top-inset', fullscreen ? '0px' : HEIGHT + 'px');
+      }).catch(() => {});
+    };
+    window.addEventListener('resize', () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(sync, 150);
+    });
+    sync();
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mount);
+  } else {
+    mount();
+  }
+})();
+"#;
+
 /// The script injected into every page the main window loads, including the
 /// remote app.
-pub fn shell_init_js() -> String {
-    INIT_JS.replace(
+pub fn shell_init_js(strings: &Strings) -> String {
+    let base = INIT_JS.replace(
         "__DEBUG__",
         if cfg!(debug_assertions) {
             "true"
         } else {
             "false"
         },
-    )
+    );
+
+    let titlebar = TITLEBAR_JS
+        .replace(
+            "__WITH_BUTTONS__",
+            if cfg!(windows) { "true" } else { "false" },
+        )
+        .replace(
+            "__MAC_OVERLAY__",
+            if cfg!(target_os = "macos") {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace("__MIN__", &js_string(&strings.window_minimize()))
+        .replace("__MAX__", &js_string(&strings.window_maximize()))
+        .replace("__RESTORE__", &js_string(&strings.window_restore()))
+        .replace("__CLOSE__", &js_string(&strings.window_close()));
+
+    format!("{base}{titlebar}")
 }
 
 #[cfg(test)]
@@ -870,24 +954,30 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_titlebar_appears_only_where_the_os_frame_is_gone() {
-        // The stylesheet (shared by every page) legitimately mentions the
-        // class — only the rendered <header> markup distinguishes the pages.
-        let welcome = holding_page_html(&strings(), false);
-        if cfg!(windows) {
-            // Frameless on Windows: the page must carry its own drag region
-            // and caption buttons.
-            assert!(welcome.contains(r#"class="app-titlebar""#));
-            assert!(welcome.contains("data-tauri-drag-region"));
-            assert!(welcome.contains("shell_window_control"));
-        } else {
-            assert!(!welcome.contains(r#"class="app-titlebar""#));
+    fn the_shell_owns_exactly_one_titlebar() {
+        // The strip lives in the INJECTED script — shell-versioned, present on
+        // the remote app and the shell's own pages alike. A web-drawn titlebar
+        // was tried and rejected: an older installed shell plus a newer web
+        // build stacked two sets of caption buttons.
+        let js = shell_init_js(&strings());
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(js.contains("orcaa-shell-titlebar"));
+            // The strip claims the app's own window-chrome inset variable so
+            // the page lays out below it.
+            assert!(js.contains("--pwa-top-inset"));
         }
+        if cfg!(windows) {
+            assert!(js.contains("shell_window_control"));
+        }
+        assert!(
+            !js.contains("__WITH_BUTTONS__") && !js.contains("__MAC_OVERLAY__"),
+            "the platform flags must be substituted"
+        );
 
-        // The update window is its own frameless window with bespoke chrome —
-        // a second titlebar there would stack two headers.
-        let update = update_page_html(&strings(), "1.0.0", "1.1.0", None);
-        assert!(!update.contains(r#"class="app-titlebar""#));
+        // The pages themselves draw NO window chrome — one titlebar, injected.
+        let welcome = holding_page_html(&strings(), false);
+        assert!(!welcome.contains("data-tauri-drag-region"));
+        assert!(!welcome.contains("shell_window_control"));
     }
 
     #[test]
@@ -934,7 +1024,7 @@ mod tests {
 
     #[test]
     fn the_injected_script_only_claims_modified_keys() {
-        let js = shell_init_js();
+        let js = shell_init_js(&strings());
 
         // A bare-key binding here would shadow the app's own "/" search.
         assert!(js.contains("e.ctrlKey || e.metaKey"));
@@ -953,7 +1043,7 @@ mod tests {
         // `contextmenu` listener here runs BEFORE the app's `useGlobalContextMenu`
         // — and the moment it calls `preventDefault()` the app's handler sees
         // `defaultPrevented` and bails, leaving the page with no menu at all.
-        let js = shell_init_js();
+        let js = shell_init_js(&strings());
 
         assert!(
             !js.contains("addEventListener('contextmenu'"),
@@ -975,7 +1065,7 @@ mod tests {
         // A full reload throws away React state and every warm query for what
         // the user meant as "refresh"; the app re-pulls data instead. The hard
         // reload stays available on Ctrl+Shift+R.
-        let js = shell_init_js();
+        let js = shell_init_js(&strings());
 
         assert!(
             js.contains("orcaa:refresh"),
