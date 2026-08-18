@@ -283,11 +283,9 @@ fn no_context_menu_js() -> String {
 /// Wraps a body in the shared document shell. Every shell page goes through
 /// here so `lang`/`dir` and the stylesheet can never drift apart between pages.
 ///
-/// Note the shell pages carry no window chrome of their own — the injected
-/// titlebar strip (see `TITLEBAR_JS`) runs on these pages exactly as it does
-/// on the remote app, so there is ONE titlebar implementation, owned by the
-/// shell, everywhere. (The update and autostart windows are separate webviews
-/// that never receive the init script; they keep their bespoke `.titlebar`.)
+/// Note the shell pages carry no window chrome of their own — window topbar
+/// and controls are owned and rendered by the frontend web app. The update
+/// and autostart windows are separate webviews that keep their bespoke `.titlebar`.
 fn document(strings: &Strings, title: &str, body_class: &str, body: &str, script: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -792,177 +790,17 @@ const INIT_JS: &str = r#"
 })();
 "#;
 
-/// The shell-owned titlebar strip.
-///
-/// Injected into every page the MAIN window shows — the remote app and the
-/// shell's own pages alike — so window chrome has exactly one implementation
-/// and it ships with the shell binary, never with a web deploy. (A web-drawn
-/// titlebar was tried and rejected: an older installed shell plus a newer web
-/// build rendered two sets of caption buttons.)
-///
-/// Layout contract with the web app: NONE, deliberately. The strip is a
-/// click-through overlay floating over the app's own topbar row (Tommy signed
-/// off on exactly this integrated look) — it claims no layout inset, so the
-/// page renders identically with or without the shell, and only the caption
-/// buttons plus a 12px top drag edge take pointer events. Do NOT set
-/// `--pwa-top-inset` here: it would push the topbar down and strand the
-/// buttons in their own empty band.
-///
-/// Buttons are Windows-only (macOS keeps its native traffic lights over the
-/// strip's left edge; Linux keeps the whole native frame and gets no strip).
-/// The greys are deliberate hardcodes: the strip floats over arbitrary app
-/// surfaces in either theme, and the close-hover red is the Windows caption
-/// convention, not a brand colour.
-const TITLEBAR_JS: &str = r#"
-(() => {
-  const WITH_BUTTONS = __WITH_BUTTONS__;
-  if (!WITH_BUTTONS && !__MAC_OVERLAY__) return;
-
-  const HEIGHT = 40;
-  const invoke = (cmd, args) =>
-    window.__TAURI_INTERNALS__.invoke(cmd, args || {});
-
-  const SVG_MIN = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor"/></svg>';
-  const SVG_MAX = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor"/></svg>';
-  const SVG_RESTORE = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 2.5V0.5h7v7H7.5" fill="none" stroke="currentColor"/><rect x="0.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor"/></svg>';
-  const SVG_CLOSE = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor"/></svg>';
-
-  const mount = () => {
-    if (document.getElementById('orcaa-shell-titlebar')) return;
-    const root = document.documentElement;
-
-    // INTEGRATED overlay, Tommy-approved look: the strip floats over the
-    // app's own topbar row so the caption buttons read as part of it — the
-    // page is NOT pushed down (no layout-inset claim; an inset would banish
-    // the buttons to their own empty band above the topbar). The whole bar
-    // is click-through: only the buttons and a thin top drag edge take
-    // pointer events, so the search bar living underneath stays fully
-    // clickable.
-    const bar = document.createElement('div');
-    bar.id = 'orcaa-shell-titlebar';
-
-    const style = document.createElement('style');
-    style.textContent =
-      '#orcaa-shell-titlebar{position:fixed;top:0;left:0;right:0;height:' + HEIGHT + 'px;' +
-      'display:flex;align-items:stretch;justify-content:flex-end;direction:ltr;' +
-      'z-index:2147483646;background:transparent;pointer-events:none;' +
-      '-webkit-user-select:none;user-select:none;}' +
-      '#orcaa-shell-titlebar .drag-edge{position:absolute;top:0;left:0;height:12px;pointer-events:auto;}' +
-      '#orcaa-shell-titlebar .controls{display:flex;align-items:stretch;pointer-events:auto;}' +
-      '#orcaa-shell-titlebar button{width:46px;border:0;background:transparent;padding:0;margin:0;' +
-      'display:inline-flex;align-items:center;justify-content:center;cursor:default;' +
-      'color:#8a94a6;outline:none;font:inherit;}' +
-      '#orcaa-shell-titlebar button:hover{background:rgba(128,134,148,0.18);}' +
-      '#orcaa-shell-titlebar button.close:hover{background:#e81123;color:#fff;}';
-    bar.appendChild(style);
-
-    const button = (cls, label, svg) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      if (cls) b.className = cls;
-      b.title = label;
-      b.setAttribute('aria-label', label);
-      b.innerHTML = svg;
-      return b;
-    };
-
-    const controls = document.createElement('div');
-    controls.className = 'controls';
-
-    let maxBtn = null;
-    if (WITH_BUTTONS) {
-      const minBtn = button('', __MIN__, SVG_MIN);
-      minBtn.addEventListener('click', () =>
-        invoke('shell_window_control', { action: 'minimize' }));
-      maxBtn = button('', __MAX__, SVG_MAX);
-      maxBtn.addEventListener('click', () =>
-        invoke('shell_window_control', { action: 'toggle-maximize' }));
-      const closeBtn = button('close', __CLOSE__, SVG_CLOSE);
-      closeBtn.addEventListener('click', () =>
-        invoke('shell_window_control', { action: 'close' }));
-      controls.appendChild(minBtn);
-      controls.appendChild(maxBtn);
-      controls.appendChild(closeBtn);
-    }
-    bar.appendChild(controls);
-
-    // A thin top-edge drag handle (stops short of the buttons). 12px keeps
-    // the app's topbar clickable while still giving the window a grab bar —
-    // the same top-edge affordance other frameless apps use.
-    const dragEdge = document.createElement('div');
-    dragEdge.className = 'drag-edge';
-    dragEdge.setAttribute('data-tauri-drag-region', '');
-    dragEdge.style.right = (WITH_BUTTONS ? 46 * 3 : 0) + 'px';
-    dragEdge.addEventListener('dblclick', () =>
-      invoke('shell_window_control', { action: 'toggle-maximize' }));
-    bar.appendChild(dragEdge);
-
-    // Appended to <html>, not <body>: the app owns and may replace the body's
-    // subtree, the strip must outlive that.
-    root.appendChild(bar);
-
-    // Maximized state picks the glyph; fullscreen (F11) retires the strip.
-    // Geometry changes always reach the webview as a DOM resize, so that is
-    // the one signal needed.
-    let timer = 0;
-    const sync = () => {
-      invoke('shell_window_state').then((state) => {
-        const s = state || {};
-        if (maxBtn) {
-          maxBtn.innerHTML = s.maximized ? SVG_RESTORE : SVG_MAX;
-          const label = s.maximized ? __RESTORE__ : __MAX__;
-          maxBtn.title = label;
-          maxBtn.setAttribute('aria-label', label);
-        }
-        bar.style.display = s.fullscreen === true ? 'none' : 'flex';
-      }).catch(() => {});
-    };
-    window.addEventListener('resize', () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(sync, 150);
-    });
-    sync();
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', mount);
-  } else {
-    mount();
-  }
-})();
-"#;
-
 /// The script injected into every page the main window loads, including the
 /// remote app.
-pub fn shell_init_js(strings: &Strings) -> String {
-    let base = INIT_JS.replace(
+pub fn shell_init_js(_strings: &Strings) -> String {
+    INIT_JS.replace(
         "__DEBUG__",
         if cfg!(debug_assertions) {
             "true"
         } else {
             "false"
         },
-    );
-
-    let titlebar = TITLEBAR_JS
-        .replace(
-            "__WITH_BUTTONS__",
-            if cfg!(windows) { "true" } else { "false" },
-        )
-        .replace(
-            "__MAC_OVERLAY__",
-            if cfg!(target_os = "macos") {
-                "true"
-            } else {
-                "false"
-            },
-        )
-        .replace("__MIN__", &js_string(&strings.window_minimize()))
-        .replace("__MAX__", &js_string(&strings.window_maximize()))
-        .replace("__RESTORE__", &js_string(&strings.window_restore()))
-        .replace("__CLOSE__", &js_string(&strings.window_close()));
-
-    format!("{base}{titlebar}")
+    )
 }
 
 #[cfg(test)]
@@ -1031,30 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_owns_exactly_one_titlebar() {
-        // The strip lives in the INJECTED script — shell-versioned, present on
-        // the remote app and the shell's own pages alike. A web-drawn titlebar
-        // was tried and rejected: an older installed shell plus a newer web
-        // build stacked two sets of caption buttons.
+    fn the_shell_does_not_inject_window_chrome() {
+        // Window chrome / topbar is owned and drawn entirely by the frontend web apps
+        // (AppTopbar + WindowControls). The desktop shell must not inject a duplicate
+        // titlebar into the webview.
         let js = shell_init_js(&strings());
-        if cfg!(any(windows, target_os = "macos")) {
-            assert!(js.contains("orcaa-shell-titlebar"));
-            // Integrated overlay contract: click-through everywhere except
-            // the buttons/drag edge, and NO layout inset — claiming
-            // --pwa-top-inset would push the topbar down and un-integrate
-            // the buttons (regression Tommy explicitly rejected).
-            assert!(js.contains("pointer-events:none"));
-            assert!(!js.contains("--pwa-top-inset"));
-        }
-        if cfg!(windows) {
-            assert!(js.contains("shell_window_control"));
-        }
-        assert!(
-            !js.contains("__WITH_BUTTONS__") && !js.contains("__MAC_OVERLAY__"),
-            "the platform flags must be substituted"
-        );
+        assert!(!js.contains("orcaa-shell-titlebar"));
+        assert!(!js.contains("drag-edge"));
 
-        // The pages themselves draw NO window chrome — one titlebar, injected.
         let welcome = holding_page_html(&strings(), false);
         assert!(!welcome.contains("data-tauri-drag-region"));
         assert!(!welcome.contains("shell_window_control"));

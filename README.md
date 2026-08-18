@@ -223,34 +223,15 @@ where the plugin deliberately skips setting the app ID.
 
 ## Branded titlebar (custom window chrome)
 
-The stock OS frame is gone and **the shell owns the replacement outright** — a titlebar strip
-injected by `TITLEBAR_JS` (part of the init script in `shell_page.rs`) into every page the main
-window shows: the remote app and the shell's own pages alike. One implementation, versioned with the
-shell binary, never with a web deploy.
-
-> ⚠️ A web-drawn titlebar (caption buttons rendered by the React topbar) was tried and **rejected**:
-> chrome rendered by the page can't know whether the running shell is frameless, so an older
-> installed shell plus a newer web build showed TWO sets of window buttons. Never move window chrome
-> back into the web apps.
+The desktop shell drops the stock OS window frame, and **the frontend web app owns and renders the topbar** with integrated window controls:
+- **Frontend Topbar** — `AppTopbar` renders `<WindowControls />` (`shared/components/layout/WindowControls`) and sets `data-tauri-drag-region` on the topbar row.
+- **Desktop IPC Bridge** — `shell_window_control` handles minimize, toggle-maximize, and close (which hides to tray). `shell_window_state` reports maximize and fullscreen status.
 
 Per platform:
 
-- **Windows** — frameless (`decorations(false)` + `shadow(true)`, which keeps resize borders and
-  edge-snap). The strip draws minimize / maximize-restore / close (`shell_window_control`), a 12px
-  top-edge drag handle (double-click toggles maximize), and hides itself in fullscreen. Close rides
-  the normal CloseRequested path, so hide-to-tray behaves exactly as before. Known tradeoff: Win11's
-  snap-layout hover on the maximize button is lost; drag-to-edge and Win+arrows still work.
-- **macOS** — native traffic lights stay, floating over the strip's left edge via
-  `TitleBarStyle::Overlay` + `hidden_title`; the strip carries the drag edge and no buttons.
-- **Linux** — fully native frame, no strip. Undecorated GTK windows lose their resize edges.
-
-**Layout contract: none, deliberately.** The strip is a click-through overlay floating over the web
-app's own topbar row, so the caption buttons read as PART of the topbar (the approved, integrated
-look). It claims no layout inset — the page renders identically with or without the shell — and only
-the buttons plus the drag edge take pointer events, so everything underneath (the search bar
-included) stays clickable. Never set `--pwa-top-inset` from the strip: it would push the topbar down
-and strand the buttons in their own empty band. The maximize glyph and fullscreen state are polled
-from `shell_window_state` on DOM resize.
+- **Windows** — frameless (`decorations(false)` + `shadow(true)`, which keeps resize borders and edge-snap). The frontend topbar draws caption buttons and acts as the window drag region.
+- **macOS** — native traffic lights stay via `TitleBarStyle::Overlay` + `hidden_title`, with the web topbar applying left padding (`orcaa-desktop-mac`).
+- **Linux** — native window frame with standard titlebar decorations.
 
 ## POS Station (silent printing, cash drawer, kiosk)
 
