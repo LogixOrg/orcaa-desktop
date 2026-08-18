@@ -83,23 +83,6 @@ impl Strings {
         self.pick("Today", "اليوم")
     }
 
-    // ---- Window controls (the shell pages' own titlebar on Windows) ----
-
-    pub fn window_minimize(&self) -> String {
-        self.pick("Minimize", "تصغير")
-    }
-
-    pub fn window_maximize(&self) -> String {
-        self.pick("Maximize", "تكبير")
-    }
-
-    pub fn window_restore(&self) -> String {
-        self.pick("Restore", "استعادة")
-    }
-
-    pub fn window_close(&self) -> String {
-        self.pick("Close", "إغلاق")
-    }
 
     // ---- Hide-to-tray hint (shown once, the first time X is pressed) ---
 
