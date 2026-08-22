@@ -81,11 +81,13 @@ description = """
 The POS station: silent ESC/POS receipt printing, cash-drawer kick, printer
 config and a test page.
 
-The printer is reached directly (TCP:9100 or a serial port) with bytes built
-in Rust from a semantic op list — the page never supplies raw device bytes,
-the drawer only fires when the saved config allows it, and nothing here can
-read anything back. Printing is the whole point of granting this to the
-hosted POS page.
+The printer is reached directly (a Windows print queue in RAW mode, TCP:9100
+or a serial port) with bytes built in Rust from a semantic op list — the page
+never supplies raw device bytes, the drawer only fires when the saved config
+allows it, and nothing here can read anything back. Listing the installed
+printers returns names and drivers only, so the station can configure itself
+instead of asking the shop to type a queue name. Printing is the whole point
+of granting this to the hosted POS page.
 """
 commands.allow = [
   "shell_pos_print",
@@ -93,6 +95,8 @@ commands.allow = [
   "shell_pos_drawer_kick",
   "shell_pos_printer_get",
   "shell_pos_printer_set",
+  "shell_pos_printers_list",
+  "shell_pos_printer_autodetect",
 ]
 
 [[permission]]

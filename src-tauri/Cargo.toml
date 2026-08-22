@@ -1,6 +1,6 @@
 [package]
 name = "orcaa-desktop"
-version = "1.2.5"
+version = "1.2.6"
 description = "Orcaa desktop wrapper (Business + Admin)"
 authors = ["Orcaa"]
 edition = "2021"
@@ -53,3 +53,14 @@ strip = true
 
 [target."cfg(windows)".dependencies]
 tauri-winrt-notification = "0.7"
+# Receipt printing over the Windows print spooler in RAW mode — the transport
+# every USB-only thermal printer needs (most of them). Only the printing and
+# foundation surfaces; the version already resolves in the lock file.
+# PRINTER_INFO_2W (the level that carries the DRIVER name, which is what
+# identifies a thermal printer) is gated behind the Security + Gdi features.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Security",
+] }

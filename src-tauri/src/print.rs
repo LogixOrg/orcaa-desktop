@@ -2,9 +2,17 @@
 //!
 //! The web POS builds a receipt as a list of semantic line ops (text / pair /
 //! rule / cut / drawer…); this module turns them into raw ESC/POS bytes and
-//! pushes them straight at the printer — TCP port 9100 or a serial COM port —
-//! with no driver, no spooler, and above all **no print dialog**. The cash
-//! drawer kick rides the same wire (drawers plug into the printer's RJ11).
+//! pushes them straight at the printer — a Windows print queue in RAW mode,
+//! TCP port 9100, or a serial COM port — with no page, no scaling, and above
+//! all **no print dialog**. The cash drawer kick rides the same wire (drawers
+//! plug into the printer's RJ11).
+//!
+//! "printer" (the RAW spooler path, see `spooler.rs`) is the DEFAULT worth
+//! reaching for: a USB thermal printer — which is most of them — exposes
+//! neither a socket nor a COM port, only a Windows queue. It is also the only
+//! transport that needs no setup at all: the queue is already installed by the
+//! vendor driver, so `shell_pos_printer_autodetect` can find it and save the
+//! config itself.
 //!
 //! The byte protocol is hand-rolled on purpose: ESC/POS is a dozen constant
 //! sequences, and owning them beats guessing at a wrapper crate's API. Only
@@ -42,8 +50,10 @@ const MAX_OPS: usize = 400;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PrinterConfig {
-    /// "network" (TCP:9100) or "serial" (COM port / tty).
+    /// "printer" (Windows spooler, RAW), "network" (TCP:9100) or "serial"
+    /// (COM port / tty).
     pub interface: String,
+    /// The Windows queue name for "printer" (as shown in Settings > Printers),
     /// `host:port` for network (port defaults to 9100 if omitted), device path
     /// for serial (`COM3`, `/dev/ttyUSB0`).
     pub address: String,
@@ -76,8 +86,8 @@ fn default_encoding() -> String {
 
 impl PrinterConfig {
     fn validate(&self) -> Result<(), String> {
-        if !matches!(self.interface.as_str(), "network" | "serial") {
-            return Err("interface must be \"network\" or \"serial\"".into());
+        if !matches!(self.interface.as_str(), "printer" | "network" | "serial") {
+            return Err("interface must be \"printer\", \"network\" or \"serial\"".into());
         }
         if self.address.trim().is_empty() {
             return Err("printer address is empty".into());
@@ -269,6 +279,17 @@ fn encode_receipt(ops: &[ReceiptOp], config: &PrinterConfig) -> Result<Vec<u8>, 
 
 fn send_to_printer(config: &PrinterConfig, bytes: &[u8]) -> Result<(), String> {
     match config.interface.as_str() {
+        "printer" => {
+            #[cfg(windows)]
+            {
+                crate::spooler::send_raw(&config.address, bytes, "Orcaa receipt")
+            }
+            #[cfg(not(windows))]
+            {
+                Err("printing through a system print queue is Windows-only;                      use a network or serial printer here"
+                    .to_string())
+            }
+        }
         "network" => {
             let address = if config.address.contains(':') {
                 config.address.clone()
@@ -403,6 +424,94 @@ pub fn shell_pos_printer_set(app: AppHandle, config: Option<PrinterConfig>) -> R
     Ok(())
 }
 
+/// The printers installed on this machine, for the settings page's picker —
+/// typing a queue name by hand is how "Microsoft XPS Document Writer" ends up
+/// in the address field of a serial printer.
+#[tauri::command]
+pub fn shell_pos_printers_list() -> Result<Vec<PrinterCandidate>, String> {
+    #[cfg(windows)]
+    {
+        Ok(crate::spooler::list_printers()?
+            .into_iter()
+            .map(PrinterCandidate::from)
+            .collect())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// Finds the counter's receipt printer and SAVES it, so a fresh station prints
+/// silently without anyone opening settings. Returns the config it stored, or
+/// `None` when no thermal printer is installed (then the page falls back to the
+/// PDF receipt and the settings page can still be used by hand).
+///
+/// Never overwrites an existing config: once someone has chosen a printer, that
+/// choice outranks detection.
+#[tauri::command]
+pub fn shell_pos_printer_autodetect(app: AppHandle) -> Result<Option<PrinterConfig>, String> {
+    if let Some(existing) = load_config(&app) {
+        return Ok(Some(existing));
+    }
+
+    #[cfg(windows)]
+    {
+        let Some(found) = crate::spooler::detect_receipt_printer() else {
+            return Ok(None);
+        };
+
+        let config = PrinterConfig {
+            interface: "printer".to_string(),
+            address: found.name,
+            baud: default_baud(),
+            // The model name usually states the roll (XP-80C -> 80mm -> 48
+            // columns); 80mm is the safer guess when it does not, since a
+            // 32-column receipt on 80mm paper is merely narrow, while the
+            // reverse wraps every line.
+            width: if found.roll_width_mm == Some(58) { 32 } else { 48 },
+            codepage: None,
+            encoding: default_encoding(),
+            drawer_kick: true,
+        };
+
+        config.validate()?;
+        shell_pos_printer_set(app, Some(config.clone()))?;
+
+        Ok(Some(config))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+/// What the settings picker shows for one installed printer. Mirrors
+/// `spooler::InstalledPrinter` so the page never sees a platform type.
+#[derive(Clone, Serialize)]
+pub struct PrinterCandidate {
+    pub name: String,
+    pub driver: String,
+    pub is_default: bool,
+    pub is_virtual: bool,
+    pub is_thermal: bool,
+    pub roll_width_mm: Option<u32>,
+}
+
+#[cfg(windows)]
+impl From<crate::spooler::InstalledPrinter> for PrinterCandidate {
+    fn from(printer: crate::spooler::InstalledPrinter) -> Self {
+        Self {
+            name: printer.name,
+            driver: printer.driver,
+            is_default: printer.is_default,
+            is_virtual: printer.is_virtual,
+            is_thermal: printer.is_thermal,
+            roll_width_mm: printer.roll_width_mm,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +584,12 @@ mod tests {
         let mut cfg = config();
         cfg.interface = "usb".into();
         assert!(cfg.validate().is_err());
+
+        // The spooler transport is a first-class interface, not a typo.
+        let mut cfg = config();
+        cfg.interface = "printer".into();
+        cfg.address = "فواتير".into();
+        assert!(cfg.validate().is_ok());
 
         let mut cfg = config();
         cfg.width = 40;
