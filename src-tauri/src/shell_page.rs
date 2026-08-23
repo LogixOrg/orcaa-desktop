@@ -407,40 +407,71 @@ const LOADING_JS: &str = r#"
   const offline = document.getElementById('offline');
   const retry = document.getElementById('retry');
 
-  // Reachability, not correctness: an opaque `no-cors` response only proves the
-  // host answered, which is exactly the question. Anything more would need CORS
-  // headers the tenant app has no reason to serve to a custom scheme.
+  // Probes reachability through a HIDDEN IFRAME rather than a bare `fetch`.
+  //
+  // The old version fetched the target with `no-cors` from THIS page's own
+  // `orcaa-shell://` origin — a cross-origin network request that can never
+  // be answered by the target tenant's own service worker (a SW only
+  // intercepts fetches made by documents of its OWN origin, never a probe
+  // from somewhere else). That made the probe equivalent to "is the real
+  // network up", which is exactly wrong once the target origin can serve a
+  // cached app shell offline (see the frontend's `sw.js` navigation
+  // handler): a device that had visited before, went offline, and could
+  // perfectly well boot from cache was told it couldn't, before ever
+  // getting the chance to try.
+  //
+  // An iframe NAVIGATION to the target IS a same-origin document load once
+  // it lands — `request.mode` is `navigate` there exactly like a top-level
+  // load — so the target's own SW gets first crack at it, cached shell
+  // included. `onload` firing (even for a SW-served fallback page) means
+  // the real top-level navigation will succeed the same way; `onerror` or
+  // the timeout elapsing means neither the network nor any cache could
+  // answer, which is the genuine "nothing to boot from" case.
+  let probeFrame = null;
+  let settled = false;
+
+  const cleanupFrame = () => {
+    if (probeFrame) { probeFrame.remove(); probeFrame = null; }
+  };
+
+  const goToTarget = () => {
+    cleanupFrame();
+    // `replace` keeps the boot page out of history.
+    window.location.replace(target);
+  };
+
   const probe = () => {
     loading.hidden = false;
     offline.hidden = true;
+    settled = false;
+    cleanupFrame();
 
-    if (navigator.onLine === false) {
-      // Skip the round trip when the OS already knows there is no network.
-      window.setTimeout(showOffline, 400);
-      return;
-    }
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      showOffline();
+    }, 6000);
 
-    const stop = new AbortController();
-    const timer = window.setTimeout(() => stop.abort(), 8000);
-
-    fetch(new URL('/', target).toString(), {
-      mode: 'no-cors',
-      cache: 'no-store',
-      signal: stop.signal,
-    })
-      .then(() => {
-        window.clearTimeout(timer);
-        // `on_navigation` already vets this host, so plain navigation is enough
-        // and no IPC is involved. `replace` keeps the boot page out of history.
-        window.location.replace(target);
-      })
-      .catch(() => {
-        window.clearTimeout(timer);
-        showOffline();
-      });
+    probeFrame = document.createElement('iframe');
+    probeFrame.style.display = 'none';
+    probeFrame.addEventListener('load', () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      goToTarget();
+    });
+    probeFrame.addEventListener('error', () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      showOffline();
+    });
+    probeFrame.src = new URL('/', target).toString();
+    document.body.appendChild(probeFrame);
   };
 
   const showOffline = () => {
+    cleanupFrame();
     loading.hidden = true;
     offline.hidden = false;
     retry.focus();
@@ -917,6 +948,46 @@ mod tests {
         assert!(html.contains("&lt;img src=x"));
         // The only </script> in the document is the one closing our own block.
         assert_eq!(html.matches("</script>").count(), 1);
+    }
+
+    #[test]
+    fn the_loading_page_probes_reachability_through_an_iframe_not_a_cross_origin_fetch() {
+        // A `fetch(target, {mode: 'no-cors'})` from THIS page's own
+        // `orcaa-shell://` origin can never be answered by the target
+        // tenant's service worker (a SW only intercepts same-origin
+        // document/fetch traffic) — so it tested real network reachability
+        // only, which is exactly wrong once the target origin can serve a
+        // cached shell offline. The probe must go through an iframe
+        // NAVIGATION instead, which the target's own SW gets a chance to
+        // answer the same way a real top-level navigation would.
+        let html = loading_page_html(&strings(), "https://clinic.orcaa.cloud/");
+
+        assert!(
+            !html.contains("mode: 'no-cors'") && !html.contains("mode:'no-cors'"),
+            "must not probe via a cross-origin no-cors fetch"
+        );
+        assert!(
+            html.contains("createElement('iframe')"),
+            "must probe reachability through an iframe navigation"
+        );
+        assert!(
+            html.contains("addEventListener('load'") && html.contains("addEventListener('error'"),
+            "must resolve the probe from the iframe's own load/error events"
+        );
+    }
+
+    #[test]
+    fn the_loading_page_does_not_skip_the_probe_just_because_navigator_online_is_false() {
+        // navigator.onLine is a coarse OS-level signal that can be wrong in
+        // either direction; short-circuiting straight to the offline page
+        // on `navigator.onLine === false` denied a device that could
+        // perfectly well boot from its own cached shell the chance to try.
+        let html = loading_page_html(&strings(), "https://clinic.orcaa.cloud/");
+
+        assert!(
+            !html.contains("navigator.onLine"),
+            "must always attempt the probe rather than trusting navigator.onLine alone"
+        );
     }
 
     #[test]
