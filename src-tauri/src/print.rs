@@ -85,7 +85,7 @@ fn default_encoding() -> String {
 }
 
 impl PrinterConfig {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if !matches!(self.interface.as_str(), "printer" | "network" | "serial") {
             return Err("interface must be \"printer\", \"network\" or \"serial\"".into());
         }
@@ -172,7 +172,9 @@ fn pair_line(left: &[u8], right: &[u8], width: usize) -> Vec<u8> {
     line
 }
 
-fn encode_receipt(ops: &[ReceiptOp], config: &PrinterConfig) -> Result<Vec<u8>, String> {
+/// `pub(crate)` for `kitchen.rs`: a KOT is the same byte protocol, and two
+/// encoders would drift.
+pub(crate) fn encode_receipt(ops: &[ReceiptOp], config: &PrinterConfig) -> Result<Vec<u8>, String> {
     if ops.len() > MAX_OPS {
         return Err(format!(
             "receipt too long ({} ops, max {MAX_OPS})",

@@ -1,4 +1,5 @@
 mod i18n;
+mod kitchen;
 mod notify;
 mod label;
 mod print;
@@ -892,6 +893,11 @@ pub fn run() {
             label::shell_label_printer_get,
             label::shell_label_printer_set,
             label::shell_label_printer_autodetect,
+            kitchen::shell_kot_print,
+            kitchen::shell_kitchen_test_print,
+            kitchen::shell_kitchen_printers_get,
+            kitchen::shell_kitchen_printer_set,
+            kitchen::shell_kitchen_printer_autodetect,
             notify::shell_notify,
             updater::update_install,
             updater::update_snooze,
