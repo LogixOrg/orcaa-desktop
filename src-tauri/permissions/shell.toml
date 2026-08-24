@@ -102,6 +102,7 @@ commands.allow = [
   "shell_label_printer_get",
   "shell_label_printer_set",
   "shell_label_printer_autodetect",
+  "shell_label_calibrate",
 ]
 
 [[permission]]

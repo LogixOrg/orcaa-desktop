@@ -893,6 +893,7 @@ pub fn run() {
             label::shell_label_printer_get,
             label::shell_label_printer_set,
             label::shell_label_printer_autodetect,
+            label::shell_label_calibrate,
             kitchen::shell_kot_print,
             kitchen::shell_kitchen_test_print,
             kitchen::shell_kitchen_printers_get,

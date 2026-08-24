@@ -293,9 +293,18 @@ fn encode_job(job: &LabelJob, config: &LabelPrinterConfig) -> Result<Vec<u8>, St
 
     // Stock geometry every job, not once per session: the printer keeps state
     // per connection, and jobs must not depend on who printed before them.
+    //
+    // The tail of the header is what the vendor's own test tool sends, and it
+    // is not decoration. Without `SET TEAR ON` the printer stops with the
+    // label's last rows still under the head; the cashier tears at the bar,
+    // the remainder stays attached to the strip, and the next job begins
+    // mid-label — one sticker cut in two, every print eating two labels.
+    // `REFERENCE 0,0` + `OFFSET 0` pin the page origin to the label's edge,
+    // and `DIRECTION 0,0` matches the vendor default so the label leaves the
+    // printer reading the right way up.
     out.extend_from_slice(
         format!(
-            "SIZE {:.1} mm,{:.1} mm\r\nGAP {:.1} mm,0 mm\r\nDENSITY {}\r\nDIRECTION 1\r\nCLS\r\n",
+            "SIZE {:.1} mm,{:.1} mm\r\nGAP {:.1} mm,0 mm\r\nDIRECTION 0,0\r\nREFERENCE 0,0\r\nOFFSET 0 mm\r\nSET TEAR ON\r\nDENSITY {}\r\nCLS\r\n",
             config.width_mm, config.height_mm, config.gap_mm, config.density
         )
         .as_bytes(),
@@ -384,7 +393,11 @@ pub async fn shell_label_test_print(app: AppHandle) -> Result<(), String> {
     let config = load_config(&app).ok_or("no label printer configured")?;
     let dots_per_mm = config.dpmm as u32;
     let width = (config.width_mm as u32) * dots_per_mm;
-    let bar_height = (config.height_mm as u32 * dots_per_mm * 2) / 5;
+    // Bars take what is left above a 3mm bottom margin, capped at 12mm.
+    let height = (config.height_mm as u32) * dots_per_mm;
+    let bar_height = height
+        .saturating_sub(24 + 24 + 8 + 24 + 3 * dots_per_mm)
+        .clamp(6 * dots_per_mm, 12 * dots_per_mm);
 
     // 95 modules × module 2 — centred EAN-13 (Orcaa's in-house 02 prefix).
     let barcode_width = 95 * 2;
@@ -394,14 +407,14 @@ pub async fn shell_label_test_print(app: AppHandle) -> Result<(), String> {
         ops: vec![
             LabelOp::Text {
                 x: 8,
-                y: 8,
+                y: 24,
                 value: "Orcaa".into(),
                 font: "3".into(),
                 scale: 1,
             },
             LabelOp::Barcode {
                 x,
-                y: 8 + 24 + 8,
+                y: 24 + 24 + 8,
                 symbology: "ean13".into(),
                 value: "0200000000008".into(),
                 height_dots: bar_height,
@@ -412,6 +425,34 @@ pub async fn shell_label_test_print(app: AppHandle) -> Result<(), String> {
     };
 
     print_jobs(app, vec![job]).await
+}
+
+/// Runs the printer's gap-sensor calibration on the loaded stock. Feeds a few
+/// labels while it measures. This is the fix for "prints in the wrong place"
+/// and "eats two labels per print" when the stock was changed or the printer
+/// is fresh out of the box — nobody should have to know the FEED-button dance.
+#[tauri::command]
+pub async fn shell_label_calibrate(app: AppHandle) -> Result<(), String> {
+    let config = load_config(&app).ok_or("no label printer configured")?;
+    config.validate()?;
+
+    let bytes = format!(
+        "SIZE {:.1} mm,{:.1} mm\r\nGAP {:.1} mm,0 mm\r\nGAPDETECT\r\n",
+        config.width_mm, config.height_mm, config.gap_mm
+    )
+    .into_bytes();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        send_bytes(
+            &config.interface,
+            &config.address,
+            config.baud,
+            &bytes,
+            "Orcaa label calibration",
+        )
+    })
+    .await
+    .map_err(|e| format!("calibration task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -522,6 +563,10 @@ mod tests {
         let tspl = text_of(&encode_job(&job, &config()).unwrap());
 
         assert!(tspl.starts_with("SIZE 40.0 mm,30.0 mm\r\nGAP 2.0 mm,0 mm\r\n"));
+        // Without TEAR ON the label stops under the head and the next print
+        // starts mid-sticker — this line is the two-labels-per-print fix.
+        assert!(tspl.contains("SET TEAR ON\r\n"));
+        assert!(tspl.contains("REFERENCE 0,0\r\n"));
         assert!(tspl.contains("CLS\r\n"));
         assert!(tspl.ends_with("PRINT 1,3\r\n"));
     }
