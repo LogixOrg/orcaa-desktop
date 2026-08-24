@@ -1,5 +1,6 @@
 mod i18n;
 mod notify;
+mod label;
 mod print;
 #[cfg(windows)]
 mod spooler;
@@ -886,6 +887,11 @@ pub fn run() {
             print::shell_pos_printer_set,
             print::shell_pos_printers_list,
             print::shell_pos_printer_autodetect,
+            label::shell_label_print,
+            label::shell_label_test_print,
+            label::shell_label_printer_get,
+            label::shell_label_printer_set,
+            label::shell_label_printer_autodetect,
             notify::shell_notify,
             updater::update_install,
             updater::update_snooze,

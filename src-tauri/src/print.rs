@@ -277,24 +277,33 @@ fn encode_receipt(ops: &[ReceiptOp], config: &PrinterConfig) -> Result<Vec<u8>, 
 // Transport
 // ---------------------------------------------------------------------------
 
-fn send_to_printer(config: &PrinterConfig, bytes: &[u8]) -> Result<(), String> {
-    match config.interface.as_str() {
+/// One wire, three transports — shared by receipts (ESC/POS) and labels
+/// (TSPL): the transport neither knows nor cares which byte protocol rides it.
+pub fn send_bytes(
+    interface: &str,
+    address: &str,
+    baud: u32,
+    bytes: &[u8],
+    document: &str,
+) -> Result<(), String> {
+    match interface {
         "printer" => {
             #[cfg(windows)]
             {
-                crate::spooler::send_raw(&config.address, bytes, "Orcaa receipt")
+                crate::spooler::send_raw(address, bytes, document)
             }
             #[cfg(not(windows))]
             {
+                let _ = document;
                 Err("printing through a system print queue is Windows-only;                      use a network or serial printer here"
                     .to_string())
             }
         }
         "network" => {
-            let address = if config.address.contains(':') {
-                config.address.clone()
+            let address = if address.contains(':') {
+                address.to_string()
             } else {
-                format!("{}:9100", config.address)
+                format!("{address}:9100")
             };
             let target = address
                 .to_socket_addrs()
@@ -312,10 +321,10 @@ fn send_to_printer(config: &PrinterConfig, bytes: &[u8]) -> Result<(), String> {
             Ok(())
         }
         "serial" => {
-            let mut port = serialport::new(&config.address, config.baud)
+            let mut port = serialport::new(address, baud)
                 .timeout(IO_TIMEOUT)
                 .open()
-                .map_err(|e| format!("can't open {}: {e}", config.address))?;
+                .map_err(|e| format!("can't open {address}: {e}"))?;
             port.write_all(bytes)
                 .map_err(|e| format!("printing failed mid-receipt: {e}"))?;
             port.flush().ok();
@@ -323,6 +332,16 @@ fn send_to_printer(config: &PrinterConfig, bytes: &[u8]) -> Result<(), String> {
         }
         other => Err(format!("unknown printer interface {other}")),
     }
+}
+
+fn send_to_printer(config: &PrinterConfig, bytes: &[u8]) -> Result<(), String> {
+    send_bytes(
+        &config.interface,
+        &config.address,
+        config.baud,
+        bytes,
+        "Orcaa receipt",
+    )
 }
 
 async fn print_ops(app: AppHandle, ops: Vec<ReceiptOp>) -> Result<(), String> {
@@ -495,6 +514,7 @@ pub struct PrinterCandidate {
     pub is_default: bool,
     pub is_virtual: bool,
     pub is_thermal: bool,
+    pub is_label: bool,
     pub roll_width_mm: Option<u32>,
 }
 
@@ -507,6 +527,7 @@ impl From<crate::spooler::InstalledPrinter> for PrinterCandidate {
             is_default: printer.is_default,
             is_virtual: printer.is_virtual,
             is_thermal: printer.is_thermal,
+            is_label: printer.is_label,
             roll_width_mm: printer.roll_width_mm,
         }
     }

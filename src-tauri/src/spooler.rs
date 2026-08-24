@@ -36,6 +36,10 @@ pub struct InstalledPrinter {
     pub is_virtual: bool,
     /// Looks like a receipt printer (driver/model match). Drives auto-setup.
     pub is_thermal: bool,
+    /// Looks like a die-cut LABEL printer (TSPL class). Separate from
+    /// `is_thermal`: a shop with both must never get its receipt on sticker
+    /// stock or its stickers on the till roll.
+    pub is_label: bool,
     /// Roll width in millimetres when the model name states it (XP-80C -> 80).
     pub roll_width_mm: Option<u32>,
 }
@@ -75,6 +79,15 @@ const VIRTUAL_MARKERS: [&str; 7] = [
 const THERMAL_MARKERS: [&str; 18] = [
     "xp-", "xprinter", "pos-", "pos58", "pos80", "thermal", "receipt", "tm-t", "tm-u", "srp-",
     "tsp1", "tsp6", "tsp7", "zj-", "gprinter", "rongta", "snbc", "bixolon",
+];
+
+/// Substrings that identify a die-cut LABEL printer (TSPL class). Note the
+/// overlap trap: Xprinter's LABEL models are XP-2xx/3xx/4xx/DT — they match
+/// the receipt marker "xp-" too, so receipt detection must test these FIRST
+/// and step aside. XP-58/80/Q (receipts) do not match any of these.
+const LABEL_MARKERS: [&str; 16] = [
+    "label", "xp-1", "xp-2", "xp-3", "xp-4", "xp-d", "tsc", "ttp-", "zdesigner", "zebra",
+    "godex", "argox", "postek", "sato", "citizen cl", "brother ql",
 ];
 
 fn matches_any(haystack: &str, needles: &[&str]) -> bool {
@@ -148,11 +161,15 @@ pub fn list_printers() -> Result<Vec<InstalledPrinter>, String> {
                 let driver = from_wide(info.pDriverName.0);
                 let port = from_wide(info.pPortName.0);
                 let haystack = format!("{} {}", name, driver).to_lowercase();
+                let is_label = matches_any(&haystack, &LABEL_MARKERS);
 
                 InstalledPrinter {
                     is_default: !default.is_empty() && name == default,
                     is_virtual: matches_any(&haystack, &VIRTUAL_MARKERS),
-                    is_thermal: matches_any(&haystack, &THERMAL_MARKERS),
+                    // A label model outranks the looser receipt match ("xp-"
+                    // catches both Xprinter families).
+                    is_thermal: !is_label && matches_any(&haystack, &THERMAL_MARKERS),
+                    is_label,
                     roll_width_mm: roll_width_from(&driver).or_else(|| roll_width_from(&name)),
                     name,
                     driver,
@@ -283,6 +300,19 @@ mod tests {
     fn an_office_laser_is_not_treated_as_a_receipt_printer() {
         for name in ["hp laserjet mfp m428", "canon ir-adv c3520", "brother dcp-l2540"] {
             assert!(!matches_any(name, &THERMAL_MARKERS), "{name}");
+        }
+    }
+
+    #[test]
+    fn label_models_are_never_mistaken_for_receipt_printers() {
+        // Same vendor, same "xp-" prefix, different stock entirely.
+        for label in ["xprinter xp-365b", "xprinter xp-237b", "tsc te244", "zdesigner gk420d"] {
+            assert!(matches_any(label, &LABEL_MARKERS), "{label}");
+        }
+        // The receipt family must NOT match the label markers.
+        for receipt in ["xprinter xp-80c", "xprinter xp-q807k", "xp-58iih"] {
+            assert!(!matches_any(receipt, &LABEL_MARKERS), "{receipt}");
+            assert!(matches_any(receipt, &THERMAL_MARKERS), "{receipt}");
         }
     }
 

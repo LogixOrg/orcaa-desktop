@@ -97,6 +97,11 @@ commands.allow = [
   "shell_pos_printer_set",
   "shell_pos_printers_list",
   "shell_pos_printer_autodetect",
+  "shell_label_print",
+  "shell_label_test_print",
+  "shell_label_printer_get",
+  "shell_label_printer_set",
+  "shell_label_printer_autodetect",
 ]
 
 [[permission]]
