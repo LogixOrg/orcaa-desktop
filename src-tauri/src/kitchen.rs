@@ -41,7 +41,7 @@ const MAX_STATIONS: usize = 32;
 
 /// Station ids are backend uuids (or `"default"`) — short opaque strings. The
 /// bound is a sanity check on the payload, not a format check.
-fn normalize_station(station_id: &str) -> Result<String, String> {
+pub(crate) fn normalize_station(station_id: &str) -> Result<String, String> {
     let station = station_id.trim();
     if station.is_empty() {
         return Err("station id is empty".into());
@@ -52,7 +52,7 @@ fn normalize_station(station_id: &str) -> Result<String, String> {
     Ok(station.to_string())
 }
 
-fn load_map(app: &AppHandle) -> HashMap<String, PrinterConfig> {
+pub(crate) fn load_map(app: &AppHandle) -> HashMap<String, PrinterConfig> {
     let Ok(store) = app.store(STORE_FILE) else {
         return HashMap::new();
     };
@@ -78,7 +78,7 @@ fn save_map(app: &AppHandle, map: &HashMap<String, PrinterConfig>) -> Result<(),
 
 /// The station's own printer, else the `"default"` entry, else a clear error
 /// the page can surface in its own (localized) toast.
-fn resolve_config(
+pub(crate) fn resolve_config(
     map: &HashMap<String, PrinterConfig>,
     station: &str,
 ) -> Result<PrinterConfig, String> {
@@ -258,6 +258,7 @@ pub fn shell_kitchen_printer_autodetect(
             encoding: "cp1256".to_string(),
             // Kitchens have no till; a KOT must never be able to pop one.
             drawer_kick: false,
+            text_mode: "codepage".to_string(),
         };
 
         config.validate()?;
@@ -284,6 +285,7 @@ mod tests {
             codepage: None,
             encoding: "cp1256".into(),
             drawer_kick: false,
+            text_mode: "codepage".to_string(),
         }
     }
 

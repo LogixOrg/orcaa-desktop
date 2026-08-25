@@ -72,6 +72,20 @@ pub struct PrinterConfig {
     /// Fire the drawer kick after a cash sale's receipt.
     #[serde(default)]
     pub drawer_kick: bool,
+    /// How a line of text reaches the paper.
+    ///
+    /// "codepage" (default) sends CHARACTERS and lets the printer draw them —
+    /// fast, crisp, and correct only when the firmware knows how to SHAPE
+    /// Arabic. Cheap Xprinter/Rongta clones don't: they map cp1256 byte by
+    /// byte, so every Arabic word prints as disconnected isolated letters in
+    /// the wrong order.
+    ///
+    /// "raster" sends the receipt as a monochrome IMAGE the web side already
+    /// laid out with the browser's own Arabic shaping (see the web side's
+    /// `pos/utils/rasterReceipt.ts`). Slower and a little heavier on the wire,
+    /// but the paper matches the screen on ANY ESC/POS printer.
+    #[serde(default = "default_text_mode")]
+    pub text_mode: String,
 }
 
 fn default_baud() -> u32 {
@@ -82,6 +96,9 @@ fn default_width() -> u8 {
 }
 fn default_encoding() -> String {
     "cp1256".to_string()
+}
+pub(crate) fn default_text_mode() -> String {
+    "codepage".to_string()
 }
 
 impl PrinterConfig {
@@ -98,11 +115,14 @@ impl PrinterConfig {
         if !matches!(self.encoding.as_str(), "cp1256" | "cp437" | "ascii") {
             return Err("encoding must be cp1256, cp437 or ascii".into());
         }
+        if !matches!(self.text_mode.as_str(), "codepage" | "raster") {
+            return Err("text_mode must be \"codepage\" or \"raster\"".into());
+        }
         Ok(())
     }
 }
 
-fn load_config(app: &AppHandle) -> Option<PrinterConfig> {
+pub(crate) fn load_config(app: &AppHandle) -> Option<PrinterConfig> {
     let store = app.store(STORE_FILE).ok()?;
     let value = store.get(STORE_KEY_PRINTER)?;
     serde_json::from_value(value).ok()
@@ -494,6 +514,7 @@ pub fn shell_pos_printer_autodetect(app: AppHandle) -> Result<Option<PrinterConf
             codepage: None,
             encoding: default_encoding(),
             drawer_kick: true,
+            text_mode: "codepage".to_string(),
         };
 
         config.validate()?;
@@ -548,6 +569,7 @@ mod tests {
             codepage: Some(50),
             encoding: "cp1256".into(),
             drawer_kick: true,
+            text_mode: "codepage".to_string(),
         }
     }
 

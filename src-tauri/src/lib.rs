@@ -3,6 +3,7 @@ mod kitchen;
 mod notify;
 mod label;
 mod print;
+mod raster;
 #[cfg(windows)]
 mod spooler;
 mod shell_page;
@@ -899,6 +900,7 @@ pub fn run() {
             kitchen::shell_kitchen_printers_get,
             kitchen::shell_kitchen_printer_set,
             kitchen::shell_kitchen_printer_autodetect,
+            raster::shell_print_raster,
             notify::shell_notify,
             updater::update_install,
             updater::update_snooze,
