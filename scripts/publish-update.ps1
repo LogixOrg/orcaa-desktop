@@ -11,11 +11,8 @@
     `latest.json` describing the release. Uploading the artifacts to the CDN is
     your job — this script does NOT push anything.
 
-.PARAMETER App
-    "business" or "admin".
-
 .PARAMETER Version
-    Semver string matching tauri.<app>.conf.json `version`, e.g. "1.0.1".
+    Semver string matching tauri.business.conf.json `version`, e.g. "1.0.1".
 
 .PARAMETER Notes
     Release notes shown to users by the updater.
@@ -32,10 +29,9 @@
     Releases pattern; pass a different value if you self-host.
 
 .EXAMPLE
-    .\publish-update.ps1 -App business -Version 1.0.1 -Notes "Bug fixes."
+    .\publish-update.ps1 -Version 1.0.1 -Notes "Bug fixes."
 #>
 param(
-    [Parameter(Mandatory)] [ValidateSet("business", "admin")] [string]$App,
     [Parameter(Mandatory)] [string]$Version,
     [string]$Notes = "Improvements and fixes.",
     [string]$PrivateKey = $env:TAURI_SIGNING_PRIVATE_KEY,
@@ -54,10 +50,10 @@ if (-not (Test-Path $PrivateKey)) {
 
 $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $BundleDir = Join-Path $RepoRoot "src-tauri\target\release\bundle\nsis"
-$OutDir = Join-Path $RepoRoot "dist\$App"
+$OutDir = Join-Path $RepoRoot "dist"
 
 if (-not (Test-Path $BundleDir)) {
-    throw "Bundle directory missing: $BundleDir`nRun 'pnpm build:$App' first."
+    throw "Bundle directory missing: $BundleDir`nRun 'pnpm build:business' first."
 }
 
 $ZipPattern = "*_${Version}_x64-setup.nsis.zip"

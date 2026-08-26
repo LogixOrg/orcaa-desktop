@@ -43,8 +43,15 @@ const STORE_KEY_AUTOSTART_ASKED: &str = "autostart_prompt_seen";
 /// delete whatever level a pre-lock version persisted.
 const STORE_KEY_ZOOM: &str = "zoom_level";
 
-const FALLBACK_URL_BUSINESS: &str = "https://auth.orcaa.cloud";
-const FALLBACK_URL_ADMIN: &str = "https://admin.orcaa.cloud";
+/// Where a fresh install starts. One app serves every audience: auth is the
+/// universal sign-in for owners, staff AND platform admins, and it hands the
+/// finished session back with the subdomain to land on — `admin` for platform
+/// admins, the tenant label for everyone else.
+const FALLBACK_URL: &str = "https://auth.orcaa.cloud";
+
+/// The deep-link scheme the browser calls back on. Exactly one desktop app
+/// ships, so exactly one scheme is ever registered.
+const DEEP_LINK_SCHEME: &str = "orcaa";
 
 const MAIN_WINDOW: &str = "main";
 
@@ -58,14 +65,6 @@ const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(20);
 /// restoring a "hidden" state would make the next launch appear to do nothing.
 fn window_state_flags() -> StateFlags {
     StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED | StateFlags::FULLSCREEN
-}
-
-fn fallback_url(identifier: &str) -> &'static str {
-    if identifier.contains("admin") {
-        FALLBACK_URL_ADMIN
-    } else {
-        FALLBACK_URL_BUSINESS
-    }
 }
 
 /// The auth app is the one orcaa host the webview must never render — sign-in
@@ -310,6 +309,50 @@ fn open_app_path(app: &AppHandle, path: &str) {
     }
 }
 
+/// Whether a URL is the platform console rather than a tenant app.
+///
+/// One desktop app serves both audiences, so anything that used to differ
+/// between the two builds is now resolved from the page actually on screen.
+fn is_admin_console(url: &Url) -> bool {
+    is_orcaa_host(url)
+        && url
+            .host_str()
+            .map(|host| host.starts_with("admin."))
+            .unwrap_or(false)
+}
+
+fn showing_admin_console(app: &AppHandle) -> bool {
+    app.get_webview_window(MAIN_WINDOW)
+        .and_then(|window| window.url().ok())
+        .map(|url| is_admin_console(&url))
+        .unwrap_or(false)
+}
+
+/// Tray handle for the primary quick-jump, managed so its label can follow the
+/// origin the webview lands on.
+struct PrimaryNavMenuItem(MenuItem<tauri::Wry>);
+
+/// Keeps the tray's primary jump honest: "POS" on a tenant, "Today" on the
+/// platform console. A menu entry promising POS that lands on `admin/pos` (a
+/// 404) is worse than no entry at all.
+fn sync_primary_nav_item(app: &AppHandle, strings: &Strings) {
+    // The tray is built after the window, so the earliest page loads find no
+    // item yet — setup re-syncs once the menu exists.
+    let Some(item) = app.try_state::<PrimaryNavMenuItem>() else {
+        return;
+    };
+
+    let label = if showing_admin_console(app) {
+        strings.tray_today()
+    } else {
+        strings.tray_pos()
+    };
+
+    if let Err(err) = item.0.set_text(label) {
+        log::warn!("failed to update the tray quick-jump label: {err}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sign-in
 // ---------------------------------------------------------------------------
@@ -328,7 +371,7 @@ fn start_browser_sign_in(app: &AppHandle) {
     };
     let pending = app.state::<PendingSignIn>();
 
-    let Some(browser_url) = pending.begin(&config.auth_base, &config.deep_link_scheme) else {
+    let Some(browser_url) = pending.begin(&config.auth_base, DEEP_LINK_SCHEME) else {
         log::error!("failed to start browser sign-in");
         return;
     };
@@ -356,7 +399,7 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
     let Some(resolved) = app.state::<PendingSignIn>().resolve(
         incoming,
         &config.base_domain,
-        &config.deep_link_scheme,
+        DEEP_LINK_SCHEME,
     ) else {
         // Unsolicited, replayed, or tampered — indistinguishable on purpose.
         log::warn!("ignoring a deep link that does not match a pending sign-in");
@@ -382,11 +425,6 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
 struct AppUrls {
     auth_base: String,
     base_domain: String,
-    /// This build's deep-link scheme. Business and admin ship from one codebase
-    /// but must never share one — Windows gives a scheme to whichever installer
-    /// ran last, so a shared scheme means one app silently swallows the other's
-    /// sign-in callbacks.
-    deep_link_scheme: String,
 }
 
 pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
@@ -915,7 +953,6 @@ pub fn run() {
                 .unwrap_or_else(|| "Orcaa".into());
             let version = app.package_info().version.to_string();
             let strings = Strings::detect(product_name.clone());
-            let fallback = fallback_url(&identifier);
 
             log::info!("starting {product_name} {version} ({identifier})");
 
@@ -931,25 +968,20 @@ pub fn run() {
             let saved = store
                 .get(STORE_KEY_LAST_URL)
                 .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| fallback.to_string());
+                .unwrap_or_else(|| FALLBACK_URL.to_string());
 
             let initial_url: Url = saved
                 .parse()
-                .or_else(|_| fallback.parse())
+                .or_else(|_| FALLBACK_URL.parse())
                 .expect("fallback URL must parse");
 
-            let fallback_url: Url = fallback.parse().expect("fallback URL must parse");
+            let fallback_url: Url = FALLBACK_URL.parse().expect("fallback URL must parse");
             // auth.* is the ONLY sign-in surface, for every guard including
-            // platform admins — the admin app now ships a /login shim that
-            // forwards here. Both desktop builds therefore hop to the same host.
+            // platform admins — the admin app ships a /login shim that forwards
+            // here, and auth hands admins back under the reserved "admin" label.
             app.manage(AppUrls {
                 auth_base: format!("https://auth.{}", base_domain_of(&fallback_url)),
                 base_domain: base_domain_of(&fallback_url),
-                deep_link_scheme: if identifier.contains("admin") {
-                    "orcaa-admin".to_string()
-                } else {
-                    "orcaa".to_string()
-                },
             });
             app.manage(PendingSignIn::default());
             app.manage(PendingUpdate::default());
@@ -973,6 +1005,7 @@ pub fn run() {
 
             let nav_handle = app.handle().clone();
             let load_product = product_name.clone();
+            let load_strings = strings.clone();
 
             let window_builder = tauri::WebviewWindowBuilder::new(
                 app,
@@ -1051,6 +1084,7 @@ pub fn run() {
                 log::info!("page loaded: {}", payload.url());
                 reset_zoom(&window);
                 set_window_title(&window, &load_product);
+                sync_primary_nav_item(&window.app_handle().clone(), &load_strings);
             });
 
             // Branded titlebar. Windows drops the OS frame — the web topbar
@@ -1101,10 +1135,9 @@ pub fn run() {
             }
 
             // Global summon shortcut — the app lives in the tray, so it needs a
-            // key that works from anywhere. Ctrl(⌘)+Shift+O for business,
-            // Ctrl(⌘)+Shift+A for admin, so running both apps doesn't make them
-            // fight over one chord. A registration conflict with some other
-            // program is logged and ignored — never fatal.
+            // key that works from anywhere. Ctrl(⌘)+Shift+O. A registration
+            // conflict with some other program is logged and ignored — never
+            // fatal.
             {
                 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
@@ -1113,12 +1146,7 @@ pub fn run() {
                 } else {
                     Modifiers::CONTROL | Modifiers::SHIFT
                 };
-                let code = if identifier.contains("admin") {
-                    Code::KeyA
-                } else {
-                    Code::KeyO
-                };
-                let summon = Shortcut::new(Some(modifiers), code);
+                let summon = Shortcut::new(Some(modifiers), Code::KeyO);
 
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
@@ -1141,15 +1169,15 @@ pub fn run() {
             // Quick jumps to the two pages each audience reaches for most. The
             // handler only ever swaps the path on the current origin (see
             // `open_app_path`), so these are navigation sugar, not new powers.
-            let is_admin_build = identifier.contains("admin");
+            //
+            // One app now serves both the tenant and the platform console, so
+            // the primary jump follows the origin currently on screen rather
+            // than a build flag: POS for a tenant, Today for admin.
+            // `sync_primary_nav_item` keeps the label truthful on navigation.
             let quick_primary = MenuItem::with_id(
                 app,
                 "nav_primary",
-                if is_admin_build {
-                    strings.tray_today()
-                } else {
-                    strings.tray_pos()
-                },
+                strings.tray_pos(),
                 true,
                 None::<&str>,
             )?;
@@ -1200,6 +1228,13 @@ pub fn run() {
             // closure consumes the original.
             app.manage(AutostartMenuItem(autostart_item.clone()));
 
+            // Same handle-through-managed-state trick, so `sync_primary_nav_item`
+            // can relabel the jump as the webview moves between the tenant app
+            // and the platform console. Synced once here because the first page
+            // load happens before this menu exists.
+            app.manage(PrimaryNavMenuItem(quick_primary.clone()));
+            sync_primary_nav_item(app.handle(), &strings);
+
             let menu_strings = strings.clone();
             // Product name only — no version. The hover tooltip is a brand
             // surface, not a diagnostic one; the version lives in the startup
@@ -1211,7 +1246,10 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
                     // Admin's Today command center lives at "/", not "/today".
-                    "nav_primary" => open_app_path(app, if is_admin_build { "/" } else { "/pos" }),
+                    "nav_primary" => {
+                        let path = if showing_admin_console(app) { "/" } else { "/pos" };
+                        open_app_path(app, path)
+                    }
                     "nav_dashboard" => open_app_path(app, "/dashboard"),
                     "autostart" => {
                         let manager = app.autolaunch();

@@ -1,12 +1,19 @@
 # Orcaa Desktop
 
-Tauri 2.x desktop wrapper for the [Orcaa](https://orcaa.cloud) PWAs (Business + Admin).
-One Rust source tree, two app configs, builds for Windows + macOS.
+Tauri 2.x desktop wrapper for the [Orcaa](https://orcaa.cloud) PWA. One Rust
+source tree, one app, builds for Windows + macOS + Linux.
 
-| App             | productName   | Identifier                     | Initial URL (fresh install) |
-| --------------- | ------------- | ------------------------------ | --------------------------- |
-| Business (main) | `Orcaa`       | `cloud.orcaa.business.desktop` | `https://auth.orcaa.cloud`  |
-| Admin           | `Orcaa Admin` | `cloud.orcaa.admin.desktop`    | `https://admin.orcaa.cloud` |
+| App     | productName | Identifier                     | Initial URL (fresh install) |
+| ------- | ----------- | ------------------------------ | --------------------------- |
+| Orcaa   | `Orcaa`     | `cloud.orcaa.business.desktop` | `https://auth.orcaa.cloud`  |
+
+**One app serves every audience.** There used to be a second "Orcaa Admin" build
+pointed at `admin.orcaa.cloud`; it compiled from this same crate and rendered the
+same window, so it bought nothing but a second icon, release channel and updater
+manifest. A platform admin now signs in through this app like anyone else — auth
+hands them back under the reserved `admin` subdomain label and the window lands on
+`admin.orcaa.cloud`. Anything that used to key off the build variant (the tray's
+primary quick-jump) now reads the origin currently on screen instead.
 
 The wrapper loads the live hosted PWA — no SPA bundling. App updates ship via the web deploy; only new native features require a desktop rebuild.
 
@@ -26,7 +33,7 @@ All three build from the same tag push — one workflow, three matrix jobs, one 
 
 The PWA source lives in a separate repo (`orcaa-apps`). This repo only contains the desktop wrapper. They communicate at runtime:
 
-- This wrapper loads `https://auth.orcaa.cloud` (or `https://admin.orcaa.cloud`) into a WebView2 window
+- This wrapper loads `https://auth.orcaa.cloud` into a WebView2 window, and from there whatever tenant (or `admin.orcaa.cloud`) the signed-in session belongs to
 - The PWA detects it's inside Tauri via `window.__TAURI_INTERNALS__` and conditionally hides the "Notifications Blocked" browser banner + routes notifications through the OS via `@tauri-apps/plugin-notification`
 - No compile-time coupling. You can ship desktop releases independently of PWA releases
 
@@ -129,15 +136,16 @@ signalling the running one. `tauri-plugin-single-instance` is therefore built wi
 so the argument is forwarded into the live instance — without that feature the link silently opens a second
 window instead of resuming sign-in.
 
-The **admin** desktop build is unchanged: it points at `admin.orcaa.cloud`, whose two-step email-code login
-never goes through the auth app, so there is nothing to hand off.
+**Platform admins take the same path.** The admin app ships a `/login` shim that forwards to
+auth, and `completeHandoff` hands admins back under the reserved `admin` subdomain label — which the
+shell resolves to `admin.orcaa.cloud/desktop-handoff`, a route the admin app serves. No second build,
+no second scheme.
 
-**Each build registers its own scheme** — `orcaa` in `tauri.business.conf.json`, `orcaa-admin` in
-`tauri.admin.conf.json`, never in the shared base config. Both builds registering the *same* scheme would be
-a collision: Windows hands a scheme to whichever installer ran last, so on a machine with both apps
-installed a callback could be delivered to the wrong app, which has no pending sign-in and would silently
-drop it — leaving the other one waiting on the holding page forever. Keep any future build on a distinct
-scheme rather than sharing one.
+**The scheme is declared in `tauri.business.conf.json`, never in the shared base config.** Only one
+desktop app ships, so only `orcaa` is ever registered. If a second build is ever added, give it a
+*distinct* scheme: Windows hands a scheme to whichever installer ran last, so two apps sharing one
+means a callback can be delivered to the app with no pending sign-in, which silently drops it and
+leaves the other waiting on the holding page forever.
 
 ---
 
@@ -266,12 +274,14 @@ All five commands are grouped under the `allow-shell-pos` app permission (remote
 - **Unread badge** — `shell_badge(count)` mirrors the web bell's unread count onto the taskbar
   (Windows: red-dot overlay drawn in code) or dock (macOS/Linux: numeric badge). Wired from both
   AppTopbars via `useDesktopBadge`; zero (and sign-out) clears it.
-- **Global summon shortcut** — Ctrl(⌘)+Shift+O (business) / Ctrl(⌘)+Shift+A (admin) toggles the
-  window from anywhere, via `tauri-plugin-global-shortcut`. A registration conflict with another
-  program is logged and ignored, never fatal.
-- **Tray quick actions** — Point of Sale + Dashboard (business), Today + Dashboard (admin). These
-  only swap the *path* on the origin the webview already sits on (`open_app_path`), so the tray can
-  never steer the app to another host; before sign-in they simply raise the window.
+- **Global summon shortcut** — Ctrl(⌘)+Shift+O toggles the window from anywhere, via
+  `tauri-plugin-global-shortcut`. A registration conflict with another program is logged and
+  ignored, never fatal.
+- **Tray quick actions** — a primary jump + Dashboard. The primary jump follows the origin on
+  screen: Point of Sale on a tenant, Today on `admin.*` (`sync_primary_nav_item` relabels it on
+  every page load, so it never promises a page the current host doesn't serve). Both only swap the
+  *path* on the origin the webview already sits on (`open_app_path`), so the tray can never steer
+  the app to another host; before sign-in they simply raise the window.
 
 ---
 
@@ -303,18 +313,14 @@ pnpm install
 
 ```bash
 pnpm icons:business
-pnpm icons:admin
 ```
 
-Reads source PNGs from `source-icons/{business,admin}.png` and produces the full Tauri icon set (`32x32.png`, `128x128.png`, `icon.ico`, `icon.icns`, etc.) into `src-tauri/icons/{business,admin}/`.
-
-> **Heads up:** `business.png` and `admin.png` start out identical. Replace `admin.png` with a differentiated variant before public release so users can tell the two apps apart in taskbar / Start menu.
+Reads the source PNG from `source-icons/business.png` and produces the full Tauri icon set (`32x32.png`, `128x128.png`, `icon.ico`, `icon.icns`, etc.) into `src-tauri/icons/business/`.
 
 ### Dev
 
 ```bash
 pnpm dev:business   # opens window at https://auth.orcaa.cloud
-pnpm dev:admin      # opens window at https://admin.orcaa.cloud
 ```
 
 DevTools: right-click → Inspect (debug builds only).
@@ -323,7 +329,6 @@ DevTools: right-click → Inspect (debug builds only).
 
 ```bash
 pnpm build:business
-pnpm build:admin
 ```
 
 Output (Windows):
@@ -365,13 +370,12 @@ Note: paste the **contents**, not the path. tauri-action expects the key as a st
 > compares `1.0.0 > 1.0.0`, decides it is current, and never updates. This
 > silently stalled updates for the whole 1.0.x line. Bump the config, always.
 
-Keep all five in lockstep — both apps share one Rust crate, so they version together:
+Keep all four in lockstep — CI fails the release if any of them drift:
 
 ```bash
 # 1. Bump every version field to the SAME number
 #    src-tauri/tauri.conf.json          → "version": "1.0.3"
 #    src-tauri/tauri.business.conf.json → "version": "1.0.3"
-#    src-tauri/tauri.admin.conf.json    → "version": "1.0.3"
 #    src-tauri/Cargo.toml               → version = "1.0.3"
 #    package.json                       → "version": "1.0.3"
 
@@ -408,14 +412,8 @@ Build time: ~5–10 min with caches, ~15–20 min cold. GitHub Actions is free f
 
 ### Manual run (without a tag)
 
-Go to **Actions** tab → **Build & Release Desktop** → **Run workflow** → pick `business` or `admin`. Uses the version from the chosen app's config file.
-
-### Releasing the admin app
-
-A plain `v*.*.*` tag builds **both** apps (business + admin) — they share one crate, so a shared fix
-must reach both. `admin-v*.*.*` builds admin only; "Run workflow" lets you pick either or both. Admin
-releases land on their own `admin-v*` tag marked prerelease, which keeps `/releases/latest/` (and the
-landing page's stable download URLs) resolving to business builds.
+Go to **Actions** tab → **Build & Release Desktop** → **Run workflow**. Uses the version from
+`src-tauri/tauri.business.conf.json`, same as a tag push.
 
 ---
 
@@ -473,7 +471,6 @@ Produces:
 - `orcaa.key` — **private**, never commit. Store in 1Password + add to GitHub repo secrets as `TAURI_SIGNING_PRIVATE_KEY`.
 - `orcaa.key.pub` — public. Paste the base64 string into [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json) → `plugins.updater.pubkey`.
 
-Same key pair signs both Business and Admin.
 
 ### Update endpoint
 
@@ -485,7 +482,7 @@ Set in [`src-tauri/tauri.conf.json`](src-tauri/tauri.conf.json):
 ]
 ```
 
-GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent release's assets. Admin releases are marked `prerelease`, so `/latest/` always resolves to a business release.
+GitHub auto-redirects `/releases/latest/download/<filename>` to the most recent release's assets. Releases are never marked `prerelease`, so `/latest/` always resolves to the newest one.
 
 **Registering the plugin is not enough — Tauri 2 never checks on its own.** The check is driven from [`src-tauri/src/updater.rs`](src-tauri/src/updater.rs):
 

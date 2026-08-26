@@ -2,7 +2,7 @@
 # Signs Tauri macOS bundles (.app.tar.gz) and emits/updates latest.json.
 #
 # Usage:
-#   ./publish-update.sh business 1.0.1 "Bug fixes."
+#   ./publish-update.sh 1.0.1 "Bug fixes."
 #
 # Env vars:
 #   TAURI_SIGNING_PRIVATE_KEY          - path to the private key (same one as Windows)
@@ -12,22 +12,16 @@
 # Actions workflow. Run AFTER a local build on a macOS machine, e.g.
 #   pnpm tauri build --config src-tauri/tauri.business.conf.json
 # This script does NOT upload anything — copy the contents of
-# desktop/dist/<app>/ to your CDN at https://orcaa.cloud/desktop/<app>/
+# desktop/dist/ to your CDN at https://orcaa.cloud/desktop/
 
 set -euo pipefail
 
-APP="${1:-}"
-VERSION="${2:-}"
-NOTES="${3:-Improvements and fixes.}"
+VERSION="${1:-}"
+NOTES="${2:-Improvements and fixes.}"
 BASE_URL="${BASE_URL:-https://github.com/LogixOrg/orcaa-desktop/releases/download/v${VERSION}}"
 
-if [[ -z "$APP" || -z "$VERSION" ]]; then
-  echo "Usage: $0 <business|admin> <version> [notes]" >&2
-  exit 1
-fi
-
-if [[ "$APP" != "business" && "$APP" != "admin" ]]; then
-  echo "App must be 'business' or 'admin'." >&2
+if [[ -z "$VERSION" ]]; then
+  echo "Usage: $0 <version> [notes]" >&2
   exit 1
 fi
 
@@ -44,11 +38,11 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE_DIR="$REPO_ROOT/src-tauri/target/release/bundle/macos"
 DMG_DIR="$REPO_ROOT/src-tauri/target/release/bundle/dmg"
-OUT_DIR="$REPO_ROOT/dist/$APP"
+OUT_DIR="$REPO_ROOT/dist"
 
 if [[ ! -d "$BUNDLE_DIR" ]]; then
   echo "Bundle dir missing: $BUNDLE_DIR" >&2
-  echo "Run 'pnpm build:$APP' first." >&2
+  echo "Run 'pnpm build:business' first." >&2
   exit 1
 fi
 
@@ -91,7 +85,7 @@ DMG_FILE=$(find "$DMG_DIR" -maxdepth 1 -name "*_${VERSION}_*.dmg" -print -quit 2
 TARBALL_NAME=$(basename "$TARBALL")
 URL="$BASE_URL/$TARBALL_NAME"
 
-# Merge into existing latest.json (preserves windows-x86_64 entry from PS1 build)
+# Merge into existing latest.json (preserves windows-x86_64 entry from the PS1 build)
 MANIFEST="$OUT_DIR/latest.json"
 PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 

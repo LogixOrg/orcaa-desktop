@@ -1,16 +1,13 @@
 {
   "name": "orcaa-desktop",
   "version": "1.3.1",
-  "description": "Tauri 2.x desktop wrapper for the Orcaa PWAs (Business + Admin)",
+  "description": "Tauri 2.x desktop wrapper for the Orcaa PWA",
   "private": true,
   "type": "module",
   "scripts": {
     "icons:business": "tauri icon src-tauri/source-icons/business.png --output src-tauri/icons/business",
-    "icons:admin": "tauri icon src-tauri/source-icons/admin.png --output src-tauri/icons/admin",
     "dev:business": "tauri dev --config src-tauri/tauri.business.conf.json",
-    "dev:admin": "tauri dev --config src-tauri/tauri.admin.conf.json",
     "build:business": "tauri build --config src-tauri/tauri.business.conf.json",
-    "build:admin": "tauri build --config src-tauri/tauri.admin.conf.json",
     "tauri": "tauri"
   },
   "devDependencies": {

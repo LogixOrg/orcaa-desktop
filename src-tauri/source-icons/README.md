@@ -1,16 +1,19 @@
 # Desktop source icons
 
-Drop one PNG per desktop app here. The Tauri icon generator reads from this
+Drop the desktop app's PNG here. The Tauri icon generator reads from this
 folder, NOT from `apps/*/src/assets/public/icons/` (those are shared across all
-three PWAs and are identical, which would produce indistinguishable desktop
-installers).
+three PWAs and are identical, which would produce a desktop installer
+indistinguishable from a browser-installed PWA).
 
 ## Required files
 
 | File | Used by | Notes |
 |------|---------|-------|
 | `business.png` | `pnpm desktop:icons:business` | Default = same as the PWA icon. Safe to keep. |
-| `admin.png` | `pnpm desktop:icons:admin` | **Replace with a differentiated icon** before public release so users can tell Business and Admin apart in the taskbar / Start menu. |
+
+One app ships. The platform console is not a separate build — an admin signs
+in through the same window and lands on `admin.orcaa.cloud`, so it wears the
+same icon.
 
 ## Spec
 
@@ -23,7 +26,6 @@ installers).
 
 ```powershell
 pnpm desktop:icons:business
-pnpm desktop:icons:admin
 ```
 
-Outputs to `desktop/src-tauri/icons/{business,admin}/` (full set: 32×32, 128×128, 128×128@2x, icon.ico for Windows, icon.icns for macOS, etc.).
+Outputs to `desktop/src-tauri/icons/business/` (full set: 32×32, 128×128, 128×128@2x, icon.ico for Windows, icon.icns for macOS, etc.).

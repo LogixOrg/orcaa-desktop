@@ -1,21 +1,20 @@
 name: Build & Release Desktop
 
 # Triggers:
-# - Push tag "v1.0.0"           -> builds BOTH apps (business + admin)
-# - Push tag "admin-v1.0.0"     -> builds admin only
-# - Manual dispatch (Actions UI) -> pick business, admin, or both
+# - Push tag "v1.0.0"            -> builds and releases the app
+# - Manual dispatch (Actions UI) -> same, from the current ref
 #
-# Both apps compile from ONE Rust crate, so a shared fix (a capability, a shell
-# change) reaches users only when both are rebuilt. A plain "v*" tag therefore
-# builds both by default — admin used to need its own tag and silently fell
-# years behind on shared fixes.
+# ONE app ships. It used to be two — a separate "Orcaa Admin" build pointing at
+# admin.orcaa.cloud — but both compiled from the same Rust crate and the same
+# window: an admin signs in through the ordinary app and auth hands them to the
+# platform console. The second build bought nothing but a second icon, a second
+# release channel and a second updater manifest to keep alive, so it is gone.
 #
-# Each app still gets its OWN release: business lands on "v1.0.0", admin on
-# "admin-v1.0.0" marked prerelease. That split is deliberate — GitHub's
-# /releases/latest/ resolves to the newest non-prerelease, which is what keeps
-# the landing page's stable download URLs pointing at business builds.
+# The release lands on "v1.0.0" as a normal (non-prerelease) release, which is
+# what keeps /releases/latest/ — and the landing page's stable download URLs —
+# resolving to it.
 #
-# Each app builds ALL THREE platforms:
+# The build covers ALL THREE platforms:
 #   windows-latest -> .msi + .exe (NSIS) + .nsis.zip updater payload
 #   macos-latest   -> .dmg + .app.tar.gz updater payload (universal: Intel + Apple Silicon)
 #   ubuntu-22.04   -> .deb + .rpm + .AppImage (the AppImage doubles as the updater payload)
@@ -24,25 +23,13 @@ on:
   push:
     tags:
       - "v*.*.*"
-      - "admin-v*.*.*"
   workflow_dispatch:
-    inputs:
-      app:
-        description: "Which app to build"
-        required: true
-        default: "both"
-        type: choice
-        options:
-          - both
-          - business
-          - admin
 
 jobs:
   resolve:
-    name: Resolve apps + version from trigger
+    name: Resolve version from config
     runs-on: ubuntu-latest
     outputs:
-      apps: ${{ steps.pick.outputs.apps }}
       version: ${{ steps.pick.outputs.version }}
     steps:
       - name: Checkout
@@ -53,35 +40,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -n "${{ inputs.app }}" ]]; then
-            case "${{ inputs.app }}" in
-              both)  APPS='["business","admin"]' ;;
-              admin) APPS='["admin"]' ;;
-              *)     APPS='["business"]' ;;
-            esac
-          elif [[ "$GITHUB_REF_NAME" == admin-* ]]; then
-            APPS='["admin"]'
-          else
-            APPS='["business","admin"]'
-          fi
-
           # The version comes from the config, NOT the tag — it is what lands in
           # every artifact filename and in latest.json.
           VERSION=$(jq -r '.version' src-tauri/tauri.business.conf.json)
 
-          # Both apps share one crate and must ship in lockstep, so their configs
-          # must agree. A drifting pair would publish two releases claiming
-          # different versions of identical shell code.
-          for app in business admin; do
-            APP_VERSION=$(jq -r '.version' "src-tauri/tauri.${app}.conf.json")
-            if [[ "$APP_VERSION" != "$VERSION" ]]; then
-              echo "::error::tauri.${app}.conf.json says $APP_VERSION but tauri.business.conf.json says $VERSION. Both apps build from one crate — keep every version field in lockstep."
-              exit 1
-            fi
-          done
-
-          # The other three the checklist demands. Checking only the two overlay
-          # configs let package.json drift five patch versions behind unnoticed:
+          # The other three the checklist demands. Checking only the overlay
+          # config let package.json drift five patch versions behind unnoticed:
           # nothing consumes it at build time, so nothing ever complained.
           BASE_VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           PKG_VERSION=$(jq -r '.version' package.json)
@@ -91,7 +55,7 @@ jobs:
             file="${pair%%:*}"
             found="${pair#*:}"
             if [[ "$found" != "$VERSION" ]]; then
-              echo "::error::$file says $found but tauri.business.conf.json says $VERSION. All five version fields must match."
+              echo "::error::$file says $found but tauri.business.conf.json says $VERSION. All four version fields must match."
               exit 1
             fi
           done
@@ -102,24 +66,20 @@ jobs:
           # 1.0.10, correctly concludes it is current, and the update never ships.
           # That silently stalled the entire 1.0.x line. Fail loudly instead.
           if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#admin-}"
-            TAG_VERSION="${TAG_VERSION#v}"
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
             if [[ "$TAG_VERSION" != "$VERSION" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME declares version $TAG_VERSION but the app config says $VERSION. Bump all five version fields (tauri.conf.json, tauri.business.conf.json, tauri.admin.conf.json, Cargo.toml, package.json), then re-tag."
+              echo "::error::Tag $GITHUB_REF_NAME declares version $TAG_VERSION but the app config says $VERSION. Bump all four version fields (tauri.conf.json, tauri.business.conf.json, Cargo.toml, package.json), then re-tag."
               exit 1
             fi
           fi
 
-          {
-            echo "apps=$APPS"
-            echo "version=$VERSION"
-          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          echo "Resolved APPS=$APPS VERSION=$VERSION (ref=$GITHUB_REF_NAME)"
+          echo "Resolved VERSION=$VERSION (ref=$GITHUB_REF_NAME)"
 
   build:
     needs: resolve
-    name: Build ${{ matrix.app }} (${{ matrix.target.label }})
+    name: Build (${{ matrix.target.label }})
     runs-on: ${{ matrix.target.os }}
     timeout-minutes: 60
     permissions:
@@ -127,11 +87,10 @@ jobs:
 
     strategy:
       fail-fast: false
-      # Serialized: jobs write to shared releases, and the macOS runner is billed
-      # 10x on private repos — no reason to race them.
+      # Serialized: jobs write to one shared release, and the macOS runner is
+      # billed 10x on private repos — no reason to race them.
       max-parallel: 1
       matrix:
-        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
         target:
           - os: windows-latest
             label: windows-x64
@@ -153,7 +112,6 @@ jobs:
             bundle_dir: src-tauri/target/release/bundle
 
     env:
-      APP: ${{ matrix.app }}
       # Filled in by "Enable Windows signing" when the Azure secrets exist;
       # empty means the extra --config flag simply isn't passed.
       WIN_SIGN_ARGS: ""
@@ -162,29 +120,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Per-app naming lives here rather than in `resolve` now that one run can
-      # produce two apps.
+      # The stable filenames the landing page links to. They never carry the
+      # version, so the download URLs on the marketing site survive every release.
       - id: app
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ needs.resolve.outputs.version }}"
-          PRODUCT=$(jq -r '.productName' "src-tauri/tauri.${APP}.conf.json")
-
-          if [[ "$APP" == "admin" ]]; then
-            TAG="admin-v$VERSION"
-            STABLE_EXE="orcaa-admin.exe"; STABLE_DMG="orcaa-admin.dmg"; STABLE_APPIMAGE="orcaa-admin.AppImage"
-          else
-            TAG="v$VERSION"
-            STABLE_EXE="orcaa-desktop.exe"; STABLE_DMG="orcaa-desktop.dmg"; STABLE_APPIMAGE="orcaa-desktop.AppImage"
-          fi
 
           {
-            echo "tag=$TAG"
-            echo "product=$PRODUCT"
-            echo "stable_exe=$STABLE_EXE"
-            echo "stable_dmg=$STABLE_DMG"
-            echo "stable_appimage=$STABLE_APPIMAGE"
+            echo "tag=v$VERSION"
+            echo "product=$(jq -r '.productName' src-tauri/tauri.business.conf.json)"
+            echo "stable_exe=orcaa-desktop.exe"
+            echo "stable_dmg=orcaa-desktop.dmg"
+            echo "stable_appimage=orcaa-desktop.AppImage"
           } >> "$GITHUB_OUTPUT"
 
       # webkit2gtk = the Linux WebView (WebView2 / WKWebView equivalent);
@@ -225,13 +174,12 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-          key: ${{ matrix.app }}
 
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
 
       - name: Generate icons
-        run: pnpm tauri icon src-tauri/source-icons/${{ env.APP }}.png --output src-tauri/icons/${{ env.APP }}
+        run: pnpm tauri icon src-tauri/source-icons/business.png --output src-tauri/icons/business
 
       # Apple code signing + notarization is OPTIONAL. With no Apple secrets configured the
       # macOS build still succeeds and ships an unsigned .dmg (users get a Gatekeeper prompt —
@@ -344,14 +292,14 @@ jobs:
 
             **Auto-updater** — `*.nsis.zip`, `*.app.tar.gz`, `*.AppImage`, their `*.sig` files and the updater manifest (don't delete).
           releaseDraft: false
-          # Admin releases are marked prerelease so GitHub's /releases/latest/ always
-          # resolves to a business release (keeps the landing-page download stable).
-          prerelease: ${{ matrix.app == 'admin' }}
-          # The updater manifest is composed once per app, in the `manifest` job
-          # below — letting each runner write its own would have the second one
-          # clobber the first one's platform entry.
+          # Never a prerelease: /releases/latest/ is what the landing page's
+          # stable download URLs and the updater endpoint both resolve to.
+          prerelease: false
+          # The updater manifest is composed once, in the `manifest` job below —
+          # letting each runner write its own would have the second one clobber
+          # the first one's platform entry.
           includeUpdaterJson: false
-          args: --config src-tauri/tauri.${{ env.APP }}.conf.json ${{ env.WIN_SIGN_ARGS }} ${{ matrix.target.build_args }}
+          args: --config src-tauri/tauri.business.conf.json ${{ env.WIN_SIGN_ARGS }} ${{ matrix.target.build_args }}
 
       - name: Upload stable-name Windows installer
         if: runner.os == 'Windows'
@@ -397,21 +345,17 @@ jobs:
 
   manifest:
     needs: [resolve, build]
-    # Runs even when some build jobs failed. `build` is now six jobs across two
-    # apps, so without this a single failing admin/platform job skips this job
-    # entirely and the BUSINESS release ships with no latest.json — which makes
-    # /releases/latest/download/latest.json 404 for every installed client and
-    # silently stops all updates. A partial manifest is far better than none;
-    # the step below still errors if an app produced no signed payloads at all.
+    # Runs even when some build jobs failed. Without this a single failing
+    # platform job skips this job entirely and the release ships with no
+    # latest.json — which makes /releases/latest/download/latest.json 404 for
+    # every installed client and silently stops all updates. A partial manifest
+    # is far better than none; the step below still errors if the release
+    # produced no signed payloads at all.
     if: ${{ !cancelled() }}
-    name: Compose updater manifest (${{ matrix.app }})
+    name: Compose updater manifest
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        app: ${{ fromJSON(needs.resolve.outputs.apps) }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.resolve.outputs.version }}
@@ -428,11 +372,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ matrix.app }}" == "admin" ]]; then
-            TAG="admin-v$VERSION"; MANIFEST="latest-admin.json"
-          else
-            TAG="v$VERSION"; MANIFEST="latest.json"
-          fi
+          TAG="v$VERSION"; MANIFEST="latest.json"
 
           # Release notes come from the CHANGELOG.md section matching this
           # version. The branded update window renders exactly this text to end
@@ -518,26 +458,3 @@ jobs:
 
           echo "$MANIFEST:"; cat "$MANIFEST"
           gh release upload "$TAG" "$MANIFEST" -R "$GITHUB_REPOSITORY" --clobber
-
-          # The admin manifest also has to live on the newest NON-prerelease
-          # release, because that is what /releases/latest/ resolves to and the
-          # admin app's updater endpoint is
-          #   /releases/latest/download/latest-admin.json
-          #
-          # Admin releases are prereleases on purpose (it keeps the landing
-          # page's stable download URLs pointing at business builds), so that
-          # path can never resolve to an admin release. Without this copy the
-          # admin updater 404s forever — which it had been doing since day one.
-          #
-          # `/releases/latest` in the API has exactly the same "newest published
-          # non-prerelease" semantics as the download redirect, so this tracks it
-          # rather than guessing a tag.
-          if [[ "${{ matrix.app }}" == "admin" ]]; then
-            LATEST_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
-            if [[ -n "$LATEST_TAG" ]]; then
-              gh release upload "$LATEST_TAG" "$MANIFEST" -R "$GITHUB_REPOSITORY" --clobber
-              echo "Also published $MANIFEST to $LATEST_TAG so /releases/latest/ can serve it"
-            else
-              echo "::warning::No published non-prerelease found — admin updater will 404 until a business release exists"
-            fi
-          fi
