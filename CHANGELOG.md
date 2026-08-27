@@ -9,6 +9,12 @@ The release workflow's `manifest` job reads the `## <version>` section verbatim;
 no entry → users see the generic "Improvements and fixes." line and CI emits a
 warning. Adding the entry is part of the version-bump checklist in the README.
 
+## 1.3.4
+
+- One Orcaa app for everyone. The separate Orcaa Admin app is retired — sign in
+  as you always do and Orcaa opens on the right workspace for your account.
+- Summon Orcaa from anywhere with Ctrl+Shift+O, whichever workspace you land in.
+
 ## 1.2.0
 
 - POS Station: instant receipt printing with no print dialog on thermal
