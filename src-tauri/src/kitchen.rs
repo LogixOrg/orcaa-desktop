@@ -253,7 +253,11 @@ pub fn shell_kitchen_printer_autodetect(
             baud: 9600,
             // Same roll heuristic as the receipt autodetect: 80mm is the safer
             // guess — narrow on wide paper beats wrapping every line.
-            width: if found.roll_width_mm == Some(58) { 32 } else { 48 },
+            width: if found.roll_width_mm == Some(58) {
+                32
+            } else {
+                48
+            },
             codepage: None,
             encoding: "cp1256".to_string(),
             // Kitchens have no till; a KOT must never be able to pop one.
@@ -319,8 +323,14 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("an unconfigured kitchen must not resolve"),
         };
-        assert!(error.contains("bar-uuid"), "the error must name the station");
-        assert!(error.contains("default"), "and mention the missing fallback");
+        assert!(
+            error.contains("bar-uuid"),
+            "the error must name the station"
+        );
+        assert!(
+            error.contains("default"),
+            "and mention the missing fallback"
+        );
     }
 
     #[test]

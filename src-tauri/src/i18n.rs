@@ -83,7 +83,6 @@ impl Strings {
         self.pick("Today", "اليوم")
     }
 
-
     // ---- Hide-to-tray hint (shown once, the first time X is pressed) ---
 
     pub fn tray_hint_title(&self) -> String {

@@ -510,7 +510,11 @@ pub fn shell_pos_printer_autodetect(app: AppHandle) -> Result<Option<PrinterConf
             // columns); 80mm is the safer guess when it does not, since a
             // 32-column receipt on 80mm paper is merely narrow, while the
             // reverse wraps every line.
-            width: if found.roll_width_mm == Some(58) { 32 } else { 48 },
+            width: if found.roll_width_mm == Some(58) {
+                32
+            } else {
+                48
+            },
             codepage: None,
             encoding: default_encoding(),
             drawer_kick: true,

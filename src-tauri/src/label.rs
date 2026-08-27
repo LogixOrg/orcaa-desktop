@@ -204,7 +204,9 @@ fn encode_bitmap(
     let expected = bytes_per_row * height_dots as usize;
 
     if expected == 0 || expected > MAX_BITMAP_BYTES {
-        return Err(format!("bitmap dimensions out of range ({width_dots}x{height_dots})"));
+        return Err(format!(
+            "bitmap dimensions out of range ({width_dots}x{height_dots})"
+        ));
     }
 
     let raw = base64::engine::general_purpose::STANDARD
@@ -218,9 +220,7 @@ fn encode_bitmap(
         ));
     }
 
-    out.extend_from_slice(
-        format!("BITMAP {x},{y},{bytes_per_row},{height_dots},0,").as_bytes(),
-    );
+    out.extend_from_slice(format!("BITMAP {x},{y},{bytes_per_row},{height_dots},0,").as_bytes());
     // The page packs 1 = black (the natural reading of a canvas). TSPL's BITMAP
     // is the other way up: 0 = print. Invert here, once, at the wire.
     out.extend(raw.iter().map(|byte| !byte));
@@ -258,10 +258,8 @@ fn encode_barcode(
     // `1` after rotation = print the human-readable digits under the bars —
     // the till types them in by hand the day the scanner's cable breaks.
     out.extend_from_slice(
-        format!(
-            "BARCODE {x},{y},\"{kind}\",{height_dots},1,0,{module},{module},\"{payload}\"\r\n"
-        )
-        .as_bytes(),
+        format!("BARCODE {x},{y},\"{kind}\",{height_dots},1,0,{module},{module},\"{payload}\"\r\n")
+            .as_bytes(),
     );
     Ok(())
 }
@@ -490,7 +488,9 @@ pub fn shell_label_printer_set(
 /// loaded); 40×30mm is the default the market sells, and the settings card is
 /// where a different roll gets set.
 #[tauri::command]
-pub fn shell_label_printer_autodetect(app: AppHandle) -> Result<Option<LabelPrinterConfig>, String> {
+pub fn shell_label_printer_autodetect(
+    app: AppHandle,
+) -> Result<Option<LabelPrinterConfig>, String> {
     if let Some(existing) = load_config(&app) {
         return Ok(Some(existing));
     }

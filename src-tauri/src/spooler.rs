@@ -86,8 +86,22 @@ const THERMAL_MARKERS: [&str; 18] = [
 /// the receipt marker "xp-" too, so receipt detection must test these FIRST
 /// and step aside. XP-58/80/Q (receipts) do not match any of these.
 const LABEL_MARKERS: [&str; 16] = [
-    "label", "xp-1", "xp-2", "xp-3", "xp-4", "xp-d", "tsc", "ttp-", "zdesigner", "zebra",
-    "godex", "argox", "postek", "sato", "citizen cl", "brother ql",
+    "label",
+    "xp-1",
+    "xp-2",
+    "xp-3",
+    "xp-4",
+    "xp-d",
+    "tsc",
+    "ttp-",
+    "zdesigner",
+    "zebra",
+    "godex",
+    "argox",
+    "postek",
+    "sato",
+    "citizen cl",
+    "brother ql",
 ];
 
 fn matches_any(haystack: &str, needles: &[&str]) -> bool {
@@ -151,8 +165,10 @@ pub fn list_printers() -> Result<Vec<InstalledPrinter>, String> {
         .map_err(|e| format!("can't list the installed printers: {e}"))?;
 
         let default = default_printer_name();
-        let entries =
-            std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_2W, returned as usize);
+        let entries = std::slice::from_raw_parts(
+            buffer.as_ptr() as *const PRINTER_INFO_2W,
+            returned as usize,
+        );
 
         Ok(entries
             .iter()
@@ -225,7 +241,9 @@ pub fn send_raw(printer: &str, bytes: &[u8], document: &str) -> Result<(), Strin
         if job == 0 {
             let error = windows::core::Error::from_win32();
             let _ = ClosePrinter(handle);
-            return Err(format!("the printer \"{printer}\" refused the job: {error}"));
+            return Err(format!(
+                "the printer \"{printer}\" refused the job: {error}"
+            ));
         }
 
         let result = write_all(handle, bytes);
@@ -298,7 +316,11 @@ mod tests {
 
     #[test]
     fn an_office_laser_is_not_treated_as_a_receipt_printer() {
-        for name in ["hp laserjet mfp m428", "canon ir-adv c3520", "brother dcp-l2540"] {
+        for name in [
+            "hp laserjet mfp m428",
+            "canon ir-adv c3520",
+            "brother dcp-l2540",
+        ] {
             assert!(!matches_any(name, &THERMAL_MARKERS), "{name}");
         }
     }
@@ -306,7 +328,12 @@ mod tests {
     #[test]
     fn label_models_are_never_mistaken_for_receipt_printers() {
         // Same vendor, same "xp-" prefix, different stock entirely.
-        for label in ["xprinter xp-365b", "xprinter xp-237b", "tsc te244", "zdesigner gk420d"] {
+        for label in [
+            "xprinter xp-365b",
+            "xprinter xp-237b",
+            "tsc te244",
+            "zdesigner gk420d",
+        ] {
             assert!(matches_any(label, &LABEL_MARKERS), "{label}");
         }
         // The receipt family must NOT match the label markers.

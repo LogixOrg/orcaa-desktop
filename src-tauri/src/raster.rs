@@ -246,7 +246,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(bytes[at + 3], 0, "m = 0, normal density");
-        assert_eq!((bytes[at + 4], bytes[at + 5]), (2, 0), "xL/xH = bytes per row");
+        assert_eq!(
+            (bytes[at + 4], bytes[at + 5]),
+            (2, 0),
+            "xL/xH = bytes per row"
+        );
         assert_eq!((bytes[at + 6], bytes[at + 7]), (10, 0), "yL/yH = rows");
     }
 

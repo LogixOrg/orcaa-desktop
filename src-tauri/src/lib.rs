@@ -1,13 +1,13 @@
 mod i18n;
 mod kitchen;
-mod notify;
 mod label;
+mod notify;
 mod print;
 mod raster;
-#[cfg(windows)]
-mod spooler;
 mod shell_page;
 mod signin;
+#[cfg(windows)]
+mod spooler;
 mod updater;
 
 use std::time::Duration;
@@ -396,11 +396,10 @@ fn complete_browser_sign_in(app: &AppHandle, incoming: &Url) {
         return;
     };
 
-    let Some(resolved) = app.state::<PendingSignIn>().resolve(
-        incoming,
-        &config.base_domain,
-        DEEP_LINK_SCHEME,
-    ) else {
+    let Some(resolved) =
+        app.state::<PendingSignIn>()
+            .resolve(incoming, &config.base_domain, DEEP_LINK_SCHEME)
+    else {
         // Unsolicited, replayed, or tampered — indistinguishable on purpose.
         log::warn!("ignoring a deep link that does not match a pending sign-in");
         return;
@@ -1174,13 +1173,8 @@ pub fn run() {
             // the primary jump follows the origin currently on screen rather
             // than a build flag: POS for a tenant, Today for admin.
             // `sync_primary_nav_item` keeps the label truthful on navigation.
-            let quick_primary = MenuItem::with_id(
-                app,
-                "nav_primary",
-                strings.tray_pos(),
-                true,
-                None::<&str>,
-            )?;
+            let quick_primary =
+                MenuItem::with_id(app, "nav_primary", strings.tray_pos(), true, None::<&str>)?;
             let quick_dashboard = MenuItem::with_id(
                 app,
                 "nav_dashboard",
@@ -1247,7 +1241,11 @@ pub fn run() {
                     "show" => show_main_window(app),
                     // Admin's Today command center lives at "/", not "/today".
                     "nav_primary" => {
-                        let path = if showing_admin_console(app) { "/" } else { "/pos" };
+                        let path = if showing_admin_console(app) {
+                            "/"
+                        } else {
+                            "/pos"
+                        };
                         open_app_path(app, path)
                     }
                     "nav_dashboard" => open_app_path(app, "/dashboard"),
