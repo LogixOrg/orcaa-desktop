@@ -92,7 +92,6 @@ of granting this to the hosted POS page.
 commands.allow = [
   "shell_pos_print",
   "shell_pos_test_print",
-  "shell_pos_drawer_kick",
   "shell_pos_printer_get",
   "shell_pos_printer_set",
   "shell_pos_printers_list",

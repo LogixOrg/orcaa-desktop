@@ -921,7 +921,6 @@ pub fn run() {
             autostart_decline,
             print::shell_pos_print,
             print::shell_pos_test_print,
-            print::shell_pos_drawer_kick,
             print::shell_pos_printer_get,
             print::shell_pos_printer_set,
             print::shell_pos_printers_list,

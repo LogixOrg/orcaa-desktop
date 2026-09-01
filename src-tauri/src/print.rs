@@ -388,12 +388,10 @@ pub async fn shell_pos_print(app: AppHandle, ops: Vec<ReceiptOp>) -> Result<(), 
     print_ops(app, ops).await
 }
 
-/// Pops the cash drawer without printing — "no sale" / manual open. Still
-/// honors the config's `drawer_kick` gate.
-#[tauri::command]
-pub async fn shell_pos_drawer_kick(app: AppHandle) -> Result<(), String> {
-    print_ops(app, vec![ReceiptOp::Drawer]).await
-}
+// NOTE: there is deliberately no standalone drawer-kick command. The drawer
+// opens ONLY as a `ReceiptOp::Drawer` inside a cash sale/refund receipt print
+// (still gated on the config's `drawer_kick`) — a manual "no sale" pop is the
+// classic skim window, so the capability does not exist at any layer.
 
 /// One page that answers "is this printer wired right": layout, both scripts,
 /// a QR — everything the real receipts use. Deliberately does NOT kick the

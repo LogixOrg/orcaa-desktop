@@ -249,8 +249,9 @@ The desktop app's reason-to-install for retail counters — capabilities a brows
   (`text` / `pair` / `hr` / `qr` / `cut` / `drawer`); `src/print.rs` hand-encodes ESC/POS bytes and
   writes them straight to the printer over **TCP:9100** or a **serial COM port**. No driver, no
   spooler, no dialog. Payload capped at 400 ops; 4s wire timeout.
-- **Cash drawer kick** — rides the receipt (`drawer` op) or fires alone (`shell_pos_drawer_kick`,
-  "no sale"), and only when the saved config's `drawer_kick` is on.
+- **Cash drawer kick** — rides the receipt (`drawer` op) of a cash sale/refund only, and only when
+  the saved config's `drawer_kick` is on. There is deliberately **no standalone kick command**:
+  popping the till outside a sale is the classic skim window, so the capability does not exist.
 - **Printer config** (`shell_pos_printer_get`/`set`) — interface, address, width (32/58mm ·
   48/80mm), `ESC t` codepage slot, text encoding (`cp1256` Arabic / `cp437` / `ascii`), drawer
   toggle. Persisted in the shell's store per machine — per STATION, which is exactly right for
