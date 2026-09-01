@@ -105,6 +105,28 @@ commands.allow = [
 ]
 
 [[permission]]
+identifier = "allow-shell-kitchen"
+description = """
+The kitchen pass: silent KOT printing per station, the station→printer map,
+a test ticket, and the raster fallback for thermal printers whose firmware
+cannot shape Arabic.
+
+Same trust story as allow-shell-pos — bytes are built in Rust from a semantic
+op list (the page never supplies raw device bytes), tickets are hard-stripped
+of drawer/QR ops, and nothing reads anything back. Without this grant a fired
+round reaches the KDS but no paper comes out at the pass, which is the whole
+reason a kitchen runs the desktop shell.
+"""
+commands.allow = [
+  "shell_kot_print",
+  "shell_kitchen_test_print",
+  "shell_kitchen_printers_get",
+  "shell_kitchen_printer_set",
+  "shell_kitchen_printer_autodetect",
+  "shell_print_raster",
+]
+
+[[permission]]
 identifier = "allow-autostart-prompt"
 description = """
 The branded first-run autostart offer's two choices. Local only — the page is

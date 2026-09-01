@@ -13,7 +13,9 @@
       "https://*.orcaa.test"
     ]
   },
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "notification:default",
     "allow-shell-controls",
@@ -21,15 +23,24 @@
     "allow-shell-window",
     "allow-shell-badge",
     "allow-shell-pos",
+    "allow-shell-kitchen",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://*" },
-        { "url": "http://*" },
-        { "url": "mailto:*" },
-        { "url": "tel:*" }
+        {
+          "url": "https://*"
+        },
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "mailto:*"
+        },
+        {
+          "url": "tel:*"
+        }
       ]
     }
   ]
