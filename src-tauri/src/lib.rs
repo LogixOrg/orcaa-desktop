@@ -288,10 +288,9 @@ pub(crate) fn flash_main_window(app: &AppHandle) {
         dwTimeout: 0,
     };
     // SAFETY: `info` is a fully initialised FLASHWINFO whose hwnd came from the
-    // live window; FlashWindowEx only reads it.
-    unsafe {
-        FlashWindowEx(&info);
-    }
+    // live window; FlashWindowEx only reads it. The return value is the
+    // window's previous active state — nothing to act on.
+    let _ = unsafe { FlashWindowEx(&info) };
 }
 
 /// The global summon shortcut's behaviour: bring the app forward, unless it is

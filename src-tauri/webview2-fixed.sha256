@@ -1,0 +1,10 @@
+# SHA-256 pins for the WebView2 Fixed Version Runtime 109.0.1518.140 cabs, the
+# last WebView2 that runs on Windows 7. The release workflow's `build-win7` job
+# downloads each cab from this repo's `webview2-fixed-109` release and refuses
+# to bundle it unless its hash matches a line here.
+#
+# Format: one `<sha256>  <filename>` line per cab (sha256sum style). Compute the
+# hash of a cab you have verified came from Microsoft with
+#   sha256sum Microsoft.WebView2.FixedVersionRuntime.109.0.1518.140.x64.cab
+# and paste the line. Until a line exists the job fails and prints the hash it
+# saw, so nothing unverified can ever ship.

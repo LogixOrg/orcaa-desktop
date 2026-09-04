@@ -21,11 +21,25 @@ The wrapper loads the live hosted PWA — no SPA bundling. App updates ship via 
 
 | Platform | Status                                                                                        | Installer formats           |
 | -------- | --------------------------------------------------------------------------------------------- | --------------------------- |
-| Windows  | ✅ CI release flow (`windows-latest`)                                                         | `.msi`, `.exe` (NSIS)       |
+| Windows 10 1809+ / 11 (x64) | ✅ CI release flow (`windows-latest`)                                       | `.msi`, `.exe` (NSIS)       |
+| **Windows 7 SP1** (x64 + x86) | ✅ CI release flow — separate legacy lane, see "Windows 7 build" below     | `*-win7-setup.exe` (NSIS, WebView2 109 bundled) |
 | macOS    | ✅ CI release flow (`macos-latest`, universal Intel + Apple Silicon) — no Mac hardware needed | `.dmg`                      |
 | Linux    | ✅ CI release flow (`ubuntu-22.04`, x86_64)                                                   | `.deb`, `.rpm`, `.AppImage` |
 
-All three build from the same tag push — one workflow, three matrix jobs, one GitHub release.
+All of them build from the same tag push — one workflow, one GitHub release.
+
+### System requirements
+
+- **Windows 10 (1809+) / 11, 64-bit** — the standard build (`orcaa-desktop.exe`). Needs the WebView2
+  Evergreen runtime, preinstalled on these versions; the installer fetches it if missing.
+- **Windows 7 SP1, 64-bit or 32-bit** — the legacy build (`orcaa-desktop-win7.exe` /
+  `orcaa-desktop-win7-x86.exe`). Self-contained: it carries WebView2 **109.0.1518.140**, the last runtime
+  Microsoft shipped for Windows 7, so it installs offline and needs no TLS 1.2 fix-ups. Trade-offs, stated
+  plainly to users on the downloads page: Chromium 109 receives **no further security updates**, the
+  installer is ~150 MB larger, and Windows 7 has no toast centre — notifications show inside Orcaa and flash
+  the taskbar button instead. Everything else (printing, cash drawer, badge, kiosk, deep links, updater) is
+  identical.
+- **macOS 10.15+** (universal), **Linux** x86_64 with glibc 2.35+ (Ubuntu 22.04+).
 
 ---
 
@@ -176,9 +190,13 @@ Wiring lives in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs); the pages the sh
 
 ### Commands and the app ACL
 
-The crate exposes eight `#[tauri::command]`s (`signin_start`, `shell_reload`,
-`shell_fullscreen_toggle`, `shell_quit`, `shell_notify`, `update_install`, `update_snooze`,
-`update_skip`).
+The crate exposes ~30 `#[tauri::command]`s, registered in `lib.rs` (`invoke_handler`) and grouped by
+permission set in [`src-tauri/permissions/shell.toml`](src-tauri/permissions/shell.toml): sign-in
+(`signin_start`), shell controls (`shell_reload`, `shell_fullscreen_toggle`, `shell_quit`), the custom
+titlebar (`shell_window_control`, `shell_window_state`), the badge (`shell_badge`), notifications
+(`shell_notify`), POS / label / kitchen / raster printing (`shell_pos_*`, `shell_label_*`,
+`shell_kot_print`, `shell_kitchen_*`, `shell_print_raster`), the autostart offer and the update window
+(`update_install`, `update_snooze`, `update_skip`).
 
 ⚠️ **`src-tauri/permissions/shell.toml` existing is what declares an app ACL manifest.** Tauri gates IPC
 from a remote origin always, but from *local* pages only once that manifest exists. So the moment one
@@ -193,10 +211,18 @@ not a build error.
 Three layers:
 
 1. **Browser-permission banner suppression** — the PWA detects Tauri at runtime and skips its "Notifications Blocked" banner, which would be meaningless inside WebView2.
-2. **In-app WebSocket events → native Windows toasts** — when a Reverb broadcast arrives and the window isn't focused, the PWA bridges through `@tauri-apps/plugin-notification` to fire a real Windows Action Center toast.
+2. **In-app WebSocket events → native Windows toasts** — when a Reverb broadcast arrives and the window isn't focused, the PWA calls the shell's `shell_notify` command (a clickable toast that raises the window and navigates; `kind: "call"` rings). `@tauri-apps/plugin-notification` is only the fallback when that command isn't there.
 3. **Background delivery** — covered by **(2) + the tray behavior above**. As long as the app is running (even minimized to tray), the WebSocket stays connected and toasts fire.
 
 Push-when-truly-quit (after user picks Quit in tray) is a v2 concern — requires Windows Notification Service integration on the backend.
+
+**Windows 7 build:** there is no toast centre and no `combase.dll`, so neither `tauri-winrt-notification`
+nor `tauri-plugin-notification` is compiled in (see "Windows 7 build"). `shell_notify` instead flashes the
+taskbar button (`FlashWindowEx`; an incoming call also brings a tray-hidden window back minimised so there
+is a button to flash) and returns `false`. The PWA dispatches its in-app banner and chime *before* asking
+the shell, so nothing is lost — and `isLegacyShell()` (`shared/utils/isTauri.ts`, reading the
+`window.__ORCAA_SHELL__` global the injected script sets) stops it from falling through to the absent
+plugin. A one-time in-app notice explains this to the user after their first sign-in on that build.
 
 ### ⚠️ The remote-origin capability (read before touching `capabilities/`)
 
@@ -221,6 +247,14 @@ it the frameless update window's `data-tauri-drag-region` header cannot be dragg
 
 Note `https://*.orcaa.cloud` does **not** match the apex `https://orcaa.cloud` — that URL is listed
 separately (URLPattern semantics).
+
+**Windows 7 twins.** `capabilities/default-win7.json` and `capabilities/remote-win7.json` are copies of
+the two files above minus `notification:default` — the notification plugin isn't registered in the Win7
+build, and Tauri's ACL rejects a capability that names a permission from an absent plugin. Which pair a
+build uses is chosen explicitly through `app.security.capabilities` (`tauri.conf.json` lists
+`["default", "remote-webview"]`; the `tauri.win7-*.conf.json` overlays replace that with the `-win7`
+pair). **Any permission you add to `default.json` / `remote.json` goes into the twin too**, unless it
+comes from a plugin the Win7 build leaves out.
 
 Windows toasts additionally need the installed app's Start Menu shortcut to carry
 `System.AppUserModel.ID` = the bundle identifier. Tauri's NSIS installer does this automatically, which
@@ -296,6 +330,8 @@ All five commands are grouped under the `allow-shell-pos` app permission (remote
 2. **Visual Studio 2022 Build Tools** — "Desktop development with C++" workload (~3 GB)
 3. **WebView2 Runtime** — preinstalled on Win10 1809+ / Win11
 4. **Node 20+ and pnpm 10+**
+   (Building the **Windows 7** lane locally additionally needs a pinned nightly with `rust-src` — see
+   "Windows 7 build" below.)
 5. **Smart App Control: OFF** — Win11's SAC blocks unsigned build scripts; incompatible with Rust dev. (One-way switch — see Windows Security → App & browser control → Smart App Control settings.)
 
 **macOS:**
@@ -409,7 +445,54 @@ The workflow then:
 6. Uploads stable-name copies for the landing site: `orcaa-desktop.exe`, `orcaa-desktop.dmg`, `orcaa-desktop.AppImage`
 7. A final `manifest` job reads every `*.sig` on the release and composes ONE `latest.json` covering `windows-x86_64`, `darwin-aarch64`, `darwin-x86_64` and `linux-x86_64` — the auto-updater on every OS polls this single file
 
-Build time: ~5–10 min with caches, ~15–20 min cold. GitHub Actions is free for public repos and gives 2,000 Linux-minute equivalents/month for private (Windows costs 2×).
+8. A `build-win7` job (x64, then x86) builds the Windows 7 lane described below, audits the exe's imports,
+   and uploads `Orcaa_<v>_x64-win7-setup.exe` / `Orcaa_<v>_x86-win7-setup.exe` (+ `.sig`) plus the stable
+   names `orcaa-desktop-win7.exe` / `orcaa-desktop-win7-x86.exe`
+9. The `manifest` job runs twice: `latest.json` for everyone else, and `latest-win7.json`
+   (`windows-x86_64` + `windows-i686`) that only the Win7 build polls — so a Windows 7 station is never
+   offered an installer whose WebView2 it cannot run, and vice versa
+
+Build time: ~5–10 min with caches, ~15–20 min cold. GitHub Actions is free for public repos and gives 2,000 Linux-minute equivalents/month for private (Windows costs 2×). The Win7 lane adds ~10 min per architecture (it compiles the standard library).
+
+---
+
+## Windows 7 build (legacy lane)
+
+Windows 7 machines are still common at counters in Egypt and the Gulf, so a build that runs there is worth
+its cost — but three facts about the platform force every choice below. Nothing here is optional.
+
+| Fact | Consequence in this repo |
+| ---- | ------------------------ |
+| **Rust ≥ 1.78 binaries need Windows 10.** The only supported route is the tier-3 target `x86_64-win7-windows-msvc` / `i686-win7-windows-msvc`, which ships no prebuilt std. | The lane builds on a **pinned nightly** with `-Zbuild-std=std,panic_abort` (`CARGO_UNSTABLE_BUILD_STD` in the workflow; deliberately *not* in `.cargo/config.toml`, so stable builds stay untouched). Same crate, same `Cargo.lock`. |
+| **Windows 7 has no `combase.dll` (WinRT).** An exe that statically imports it fails to *load*. | `Cargo.toml` selects `tauri-plugin-notification` / `tauri-winrt-notification` only for `cfg(not(target_vendor = "win7"))`; `build.rs` turns those triples into the `legacy_win7` cfg the source branches on; `.cargo/config.toml` adds `--cfg windows_slim_errors` (drops `windows-result`'s `RoOriginateErrorW`) and a static CRT. `cargo clippy --features win7` previews the same cfg on stable — CI runs it. |
+| **WebView2 on Windows 7 stops at 109.0.1518.140** and the evergreen bootstrapper is unreliable there. | `tauri.win7-{x64,x86}.conf.json` switch `webviewInstallMode` to `fixedRuntime` and bundle the Fixed Version Runtime. The cabs live as assets on this repo's **`webview2-fixed-109` release** (one-time upload of the two Microsoft cabs, x64 + x86); the workflow verifies each against [`src-tauri/webview2-fixed.sha256`](src-tauri/webview2-fixed.sha256) before `expand`ing it into `src-tauri/webview2-fixed/` (gitignored). No hash line → the build fails and prints the hash it saw. |
+
+Then [`scripts/audit-win7-imports.ps1`](scripts/audit-win7-imports.ps1) runs `dumpbin /IMPORTS` on the
+built exe and fails the job on any DLL or entry point Windows 7 does not have (`combase.dll`,
+`bcryptprimitives!ProcessPrng`, `api-ms-win-core-*-l1-2-*`, `SetProcessDpiAwarenessContext`, …). Run it
+locally too — it is the difference between "it built" and "it starts on the customer's PC".
+
+**Local spike / repro** (from `src-tauri/`, Developer PowerShell so `dumpbin` is on PATH):
+
+```powershell
+rustup toolchain install nightly-2026-08-20 --component rust-src
+$env:CARGO_UNSTABLE_BUILD_STD = "std,panic_abort"
+cargo +nightly-2026-08-20 build --release --target x86_64-win7-windows-msvc
+..\scripts\audit-win7-imports.ps1 -Exe target\x86_64-win7-windows-msvc\release\orcaa-desktop.exe
+# full installer (needs the fixed runtime unpacked under src-tauri/webview2-fixed/ first):
+pnpm tauri build --target x86_64-win7-windows-msvc --config src-tauri/tauri.business.conf.json --config src-tauri/tauri.win7-x64.conf.json --bundles nsis
+```
+
+**Verify on a real Windows 7 SP1 VM before tagging** — a fresh one, without the UCRT update and with TLS
+1.2 off, since that is what the field looks like: install, sign in through the browser hand-off, load a
+tenant in both themes (the `@supports not (color: color-mix(...))` fallbacks in `shared/styles` are what
+keep Chromium 109 from rendering tinted chips as transparent), trigger a notification (banner + taskbar
+flash, chime), print a receipt through `spooler.rs`, open an `orcaa://` link, start with `--kiosk`, and
+let the updater pull a `latest-win7.json` from a test release.
+
+What Windows 7 users give up, and where it is said out loud: OS toasts (banner + flash instead — the
+one-time in-app notice, the downloads page and the FAQ all say so), the "Show in folder" button on a
+finished download, and Chromium security updates (109 is end-of-life on Windows 7).
 
 ### Manual run (without a tag)
 
@@ -542,10 +625,15 @@ Installers ship via **GitHub Releases** at [github.com/LogixOrg/orcaa-desktop/re
 The [Orcaa landing site](https://orcaa.cloud) download CTAs link to stable filenames that never change across versions:
 
 ```
-https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.exe        (Windows)
-https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.dmg        (macOS, universal)
-https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.AppImage   (Linux)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.exe           (Windows 10/11, x64)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop-win7.exe      (Windows 7 SP1, x64 — WebView2 109 bundled)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop-win7-x86.exe  (Windows 7 SP1, 32-bit)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.dmg           (macOS, universal)
+https://github.com/LogixOrg/orcaa-desktop/releases/latest/download/orcaa-desktop.AppImage      (Linux)
 ```
+
+There is no Microsoft Store listing and Windows 7 has no Store — the `.exe` links above are the
+distribution channel on Windows.
 
 The GitHub Actions workflow uploads stable-name copies of the versioned installers on each release, so these URLs never change — bumping versions doesn't break the landing page.
 
@@ -561,5 +649,4 @@ The GitHub Actions workflow uploads stable-name copies of the versioned installe
 - **Custom user agent** — deliberately _not_ set. `user_agent()` replaces the UA string wholesale, and the tenant subdomains sit behind Cloudflare, where a non-standard UA risks bot challenges. The PWA already identifies the shell via `__TAURI_INTERNALS__`; if the backend needs to know, send a header instead.
 - **Push when truly quit** — current flow needs the app to be running (background tray is fine). For toasts after Quit, integrate Windows Notification Service (WNS) — needs backend push channel beyond Web Push. Mitigated by the first-run autostart offer.
 - **Inline reply on chat toasts** — `tauri-winrt-notification` exposes no text-input API (buttons only); doing this needs hand-built toast XML or an upstream PR. Parked until then.
-- **USB / Windows-driver receipt printers** — `print.rs` speaks TCP:9100 and serial COM. Pure-USB printers without a virtual COM port need winspool RAW printing; add if a real customer hits it.
 - **Push when truly quit** (see above) is the remaining notification gap — chat, voice calls and click-to-navigate are all wired now.

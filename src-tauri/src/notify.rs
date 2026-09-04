@@ -80,6 +80,10 @@ fn safe_target(raw: Option<&str>) -> Option<Url> {
 /// Raises the window and, when the toast carried one, opens the page it was
 /// about. Runs on the WinRT event thread, so everything is dispatched onto the
 /// app handle rather than touched directly.
+///
+/// Unused in the Windows 7 build — there is no toast to click there — but kept
+/// unconditionally so the two builds share one file and one set of tests.
+#[cfg_attr(legacy_win7, allow(dead_code))]
 fn activate(app: &AppHandle, target: Option<Url>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -159,6 +163,16 @@ fn show_windows(app: &AppHandle, payload: &NotifyPayload, strings: &Strings) -> 
 /// anyone's face — before flashing.
 #[cfg(all(windows, legacy_win7))]
 fn show_windows(app: &AppHandle, payload: &NotifyPayload, _strings: &Strings) -> bool {
+    // Same boundary as the toast path: a hostile target is logged and dropped
+    // here too, so the Win7 build never becomes the one that lets it through.
+    let target = safe_target(payload.url.as_deref());
+    log::info!(
+        "notification (taskbar flash only on Windows 7): {} — {} (target: {})",
+        payload.title,
+        payload.body,
+        target.as_ref().map(Url::as_str).unwrap_or("none")
+    );
+
     if Kind::parse(payload.kind.as_deref()) == Kind::IncomingCall {
         if let Some(window) = app.get_webview_window("main") {
             if !window.is_visible().unwrap_or(true) {

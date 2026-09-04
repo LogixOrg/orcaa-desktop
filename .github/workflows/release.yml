@@ -19,6 +19,14 @@ name: Build & Release Desktop
 #   macos-latest   -> .dmg + .app.tar.gz updater payload (universal: Intel + Apple Silicon)
 #   ubuntu-22.04   -> .deb + .rpm + .AppImage (the AppImage doubles as the updater payload)
 # No Mac/Linux hardware required — GitHub's runners do the build, sign and notarize.
+#
+# Plus a WINDOWS 7 legacy lane (`build-win7`, x64 + x86) that ships alongside:
+#   `Orcaa_<v>_x64-win7-setup.exe` / `Orcaa_<v>_x86-win7-setup.exe` (+ .sig),
+#   stable names `orcaa-desktop-win7.exe` / `orcaa-desktop-win7-x86.exe`, and
+#   its own updater manifest `latest-win7.json`. It is a separate job, not a
+#   matrix entry: tauri-action uploads every file in the bundle dir under its
+#   own name, and the Win7 NSIS installer is born with the SAME filename as the
+#   Windows 10/11 one — it must be renamed before it touches the release.
 on:
   push:
     tags:
@@ -343,8 +351,209 @@ jobs:
           gh release upload "${{ steps.app.outputs.tag }}" "$RUNNER_TEMP/${{ steps.app.outputs.stable_appimage }}" --clobber
           echo "Uploaded ${{ steps.app.outputs.stable_appimage }} (copy of $(basename "$IMG"))"
 
-  manifest:
+  # ---------------------------------------------------------------------------
+  # Windows 7 legacy lane
+  #
+  # Three things separate this from the ordinary Windows build, and all three
+  # are forced by the platform, not chosen:
+  #   1. Rust ≥ 1.78 binaries need Windows 10. The only supported way to target
+  #      Win7 today is the tier-3 `*-win7-windows-msvc` triple, which ships no
+  #      prebuilt std — so this is a pinned NIGHTLY with `-Zbuild-std`. The
+  #      crate, its dependencies and Cargo.lock are exactly the ones the main
+  #      build uses; only the toolchain and target differ.
+  #   2. Win7 has no `combase.dll`: Cargo.toml drops the WinRT notification
+  #      crates for the `win7` target vendor, and `.cargo/config.toml` adds
+  #      `--cfg windows_slim_errors` + a static CRT (see the comments there).
+  #   3. WebView2 on Win7 stops at runtime 109 and the evergreen bootstrapper
+  #      is unreliable there (TLS 1.2 is often off; it may fetch 110+). The
+  #      installer therefore embeds the Fixed Version Runtime 109, fetched from
+  #      this repo's `webview2-fixed-109` release and verified against
+  #      src-tauri/webview2-fixed.sha256 before it is unpacked.
+  # An import audit (scripts/audit-win7-imports.ps1) then refuses to publish an
+  # exe that imports anything Windows 7 does not have — the failure mode is
+  # otherwise "the app won't start" on the customer's counter PC.
+  # ---------------------------------------------------------------------------
+  build-win7:
     needs: [resolve, build]
+    # The release object is created by the first `build` matrix job; this lane
+    # only needs it to exist, so a failed macOS/Linux build must not skip it.
+    if: ${{ !cancelled() }}
+    name: Build Windows 7 (${{ matrix.arch }})
+    runs-on: windows-latest
+    # build-std compiles the standard library too — roughly +10 min over the
+    # ordinary Windows build.
+    timeout-minutes: 90
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-win7-windows-msvc
+            stable_exe: orcaa-desktop-win7.exe
+          - arch: x86
+            target: i686-win7-windows-msvc
+            stable_exe: orcaa-desktop-win7-x86.exe
+
+    env:
+      WIN_SIGN_ARGS: ""
+      VERSION: ${{ needs.resolve.outputs.version }}
+      # Cargo reads the `[unstable]` table from the environment too; keeping
+      # this out of .cargo/config.toml is what lets every stable build ignore it.
+      CARGO_UNSTABLE_BUILD_STD: std,panic_abort
+      # Pin the date and bump it on purpose: a tier-3 target has no CI of its
+      # own upstream, so a random nightly can break this lane silently.
+      RUST_NIGHTLY: nightly-2026-08-20
+      WEBVIEW2_FIXED_VERSION: "109.0.1518.140"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+
+      # No `targets:` input on purpose — rustup has no prebuilt std for the
+      # win7 triples; `rust-src` + build-std compiles it instead.
+      - name: Setup Rust (pinned nightly + rust-src)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+          components: rust-src
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: win7-${{ matrix.arch }}
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate icons
+        run: pnpm tauri icon src-tauri/source-icons/business.png --output src-tauri/icons/business
+
+      # The last WebView2 that runs on Windows 7. Microsoft's download page
+      # only offers current versions, so the two cabs live as assets on this
+      # repo's `webview2-fixed-109` release (one-time upload, see README
+      # "Windows 7 build"). The pinned SHA-256 is what makes that trustworthy.
+      - name: Fetch WebView2 Fixed Version Runtime ${{ env.WEBVIEW2_FIXED_VERSION }} (${{ matrix.arch }})
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          CAB="Microsoft.WebView2.FixedVersionRuntime.${WEBVIEW2_FIXED_VERSION}.${{ matrix.arch }}.cab"
+          mkdir -p src-tauri/webview2-fixed
+          gh release download webview2-fixed-109 -R "$GITHUB_REPOSITORY" --pattern "$CAB" --dir src-tauri/webview2-fixed
+
+          ACTUAL=$(sha256sum "src-tauri/webview2-fixed/$CAB" | cut -d' ' -f1)
+          EXPECTED=$(grep -E "^[0-9a-fA-F]{64}\s+\*?${CAB//./\\.}\s*$" src-tauri/webview2-fixed.sha256 | awk '{print $1}' | head -1 || true)
+          if [[ -z "$EXPECTED" ]]; then
+            echo "::error::src-tauri/webview2-fixed.sha256 has no entry for $CAB. Its SHA-256 is $ACTUAL — add the line '$ACTUAL  $CAB' once you have verified the cab's origin."
+            exit 1
+          fi
+          if [[ "${ACTUAL,,}" != "${EXPECTED,,}" ]]; then
+            echo "::error::$CAB does not match the pinned SHA-256 (got $ACTUAL, expected $EXPECTED). Refusing to bundle it."
+            exit 1
+          fi
+          echo "SHA-256 verified for $CAB"
+
+          # expand.exe keeps the cab's own folder name, which is exactly the
+          # path tauri.win7-<arch>.conf.json points at.
+          expand -F:'*' "src-tauri/webview2-fixed/$CAB" src-tauri/webview2-fixed >/dev/null
+          test -f "src-tauri/webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.${WEBVIEW2_FIXED_VERSION}.${{ matrix.arch }}/msedgewebview2.exe"
+          echo "Fixed runtime unpacked."
+
+      # Same optional Azure Trusted Signing as the main lane.
+      - name: Enable Windows signing (only if secrets are configured)
+        shell: bash
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TS_ENDPOINT: ${{ secrets.AZURE_TS_ENDPOINT }}
+          AZURE_TS_ACCOUNT: ${{ secrets.AZURE_TS_ACCOUNT }}
+          AZURE_TS_PROFILE: ${{ secrets.AZURE_TS_PROFILE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$AZURE_CLIENT_SECRET" || -z "$AZURE_TS_ENDPOINT" || -z "$AZURE_TS_ACCOUNT" || -z "$AZURE_TS_PROFILE" ]]; then
+            echo "::notice::Azure Trusted Signing secrets not configured — building an UNSIGNED Windows 7 installer."
+            exit 0
+          fi
+
+          cargo install trusted-signing-cli --locked
+
+          jq -n --arg cmd "trusted-signing-cli -e $AZURE_TS_ENDPOINT -a $AZURE_TS_ACCOUNT -c $AZURE_TS_PROFILE %1" \
+            '{bundle: {windows: {signCommand: $cmd}}}' > src-tauri/tauri.windows-sign.conf.json
+
+          echo "WIN_SIGN_ARGS=--config src-tauri/tauri.windows-sign.conf.json" >> "$GITHUB_ENV"
+          echo "Windows Authenticode signing enabled (Azure Trusted Signing)."
+
+      # NSIS only: the MSI lane is for IT-managed Win10/11 fleets, and the Win7
+      # overlay's fixedRuntime block is what makes the installer self-contained.
+      - name: Build (${{ matrix.target }})
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          pnpm tauri build \
+            --target "${{ matrix.target }}" \
+            --config src-tauri/tauri.business.conf.json \
+            --config "src-tauri/tauri.win7-${{ matrix.arch }}.conf.json" \
+            $WIN_SIGN_ARGS \
+            --bundles nsis
+
+      # Refuse to ship an exe Windows 7 cannot load. Prints the full import
+      # table for review and fails on any DLL or entry point outside the Win7
+      # allowlist (combase.dll, ProcessPrng, api-ms-win-core-*-l1-2-*, …).
+      - name: Audit imports against Windows 7
+        shell: pwsh
+        run: |
+          ./scripts/audit-win7-imports.ps1 -Exe "src-tauri/target/${{ matrix.target }}/release/orcaa-desktop.exe"
+
+      # Rename BEFORE upload: the bundler names this installer exactly like the
+      # Windows 10/11 one. minisign signs the file bytes, so the .sig stays
+      # valid under the new name.
+      - name: Upload Windows 7 installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          SRC="src-tauri/target/${{ matrix.target }}/release/bundle/nsis"
+          SETUP=$(find "$SRC" -maxdepth 1 -name "*_${{ matrix.arch }}-setup.exe" | head -1)
+          if [[ -z "$SETUP" ]]; then
+            echo "::error::No NSIS installer found under $SRC"; exit 1
+          fi
+          test -f "$SETUP.sig" || { echo "::error::$SETUP has no .sig — is TAURI_SIGNING_PRIVATE_KEY set?"; exit 1; }
+
+          BASE=$(basename "${SETUP%.exe}")            # Orcaa_1.4.0_x64-setup
+          RENAMED="${BASE%-setup}-win7-setup.exe"     # Orcaa_1.4.0_x64-win7-setup.exe
+          OUT="$RUNNER_TEMP/win7"
+          mkdir -p "$OUT"
+          cp "$SETUP"     "$OUT/$RENAMED"
+          cp "$SETUP.sig" "$OUT/$RENAMED.sig"
+          cp "$SETUP"     "$OUT/${{ matrix.stable_exe }}"
+
+          gh release upload "$TAG" "$OUT/$RENAMED" "$OUT/$RENAMED.sig" "$OUT/${{ matrix.stable_exe }}" --clobber
+          echo "Uploaded $RENAMED (+ .sig) and ${{ matrix.stable_exe }}"
+
+  manifest:
+    needs: [resolve, build, build-win7]
     # Runs even when some build jobs failed. Without this a single failing
     # platform job skips this job entirely and the release ships with no
     # latest.json — which makes /releases/latest/download/latest.json 404 for
@@ -352,13 +561,26 @@ jobs:
     # is far better than none; the step below still errors if the release
     # produced no signed payloads at all.
     if: ${{ !cancelled() }}
-    name: Compose updater manifest
+    name: Compose updater manifest (${{ matrix.channel }})
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 10/11 + macOS + Linux installs poll latest.json; the Windows
+          # 7 build polls latest-win7.json (its overlay config points there), so
+          # a Win7 station is never offered an installer it cannot run.
+          - channel: stable
+            manifest: latest.json
+          - channel: win7
+            manifest: latest-win7.json
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.resolve.outputs.version }}
+      CHANNEL: ${{ matrix.channel }}
+      MANIFEST: ${{ matrix.manifest }}
     steps:
       # Needed only to read CHANGELOG.md for the release notes below.
       - name: Checkout
@@ -372,7 +594,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="v$VERSION"; MANIFEST="latest.json"
+          TAG="v$VERSION"
 
           # Release notes come from the CHANGELOG.md section matching this
           # version. The branded update window renders exactly this text to end
@@ -416,7 +638,22 @@ jobs:
             signature=$(fetch_sig "$sig_name")
             url=$(asset_url "$payload")
 
+            if [[ "$CHANNEL" == "win7" ]]; then
+              # Only the Windows 7 installers belong here. The updater plugin
+              # reports `i686` for a 32-bit build, hence the two keys.
+              case "$payload" in
+                *_x64-win7-setup.exe) add_platform "windows-x86_64" "$signature" "$url" ;;
+                *_x86-win7-setup.exe) add_platform "windows-i686"   "$signature" "$url" ;;
+                *) ;;
+              esac
+              continue
+            fi
+
             case "$payload" in
+              # The Win7 installers carry the same suffix as the ordinary NSIS
+              # one — this arm MUST come first or a re-run could hand a Windows
+              # 10/11 station an installer whose WebView2 is pinned at 109.
+              *-win7-setup.exe) ;;
               # createUpdaterArtifacts:true signs the installer itself; *.zip covers v1Compatible.
               *-setup.exe|*.nsis.zip)
                 WIN_NSIS="$signature|$url" ;;
@@ -435,16 +672,18 @@ jobs:
             esac
           done <<< "$(echo "$ASSETS" | grep '\.sig$' || true)"
 
-          # Existing installs are NSIS (landing-page exe), so prefer the NSIS payload;
-          # MSI is only the fallback if NSIS ever disappears from the release.
-          WIN="${WIN_NSIS:-$WIN_MSI}"
-          if [[ -n "$WIN" ]]; then
-            add_platform "windows-x86_64" "${WIN%%|*}" "${WIN#*|}"
+          if [[ "$CHANNEL" != "win7" ]]; then
+            # Existing installs are NSIS (landing-page exe), so prefer the NSIS payload;
+            # MSI is only the fallback if NSIS ever disappears from the release.
+            WIN="${WIN_NSIS:-$WIN_MSI}"
+            if [[ -n "$WIN" ]]; then
+              add_platform "windows-x86_64" "${WIN%%|*}" "${WIN#*|}"
+            fi
           fi
 
           COUNT=$(jq 'length' <<< "$PLATFORMS")
           if [[ "$COUNT" -eq 0 ]]; then
-            echo "::error::No updater payloads found on release $TAG. Is bundle.createUpdaterArtifacts enabled and TAURI_SIGNING_PRIVATE_KEY set?"
+            echo "::error::No updater payloads found on release $TAG for the $CHANNEL channel. Is bundle.createUpdaterArtifacts enabled and TAURI_SIGNING_PRIVATE_KEY set?"
             exit 1
           fi
 

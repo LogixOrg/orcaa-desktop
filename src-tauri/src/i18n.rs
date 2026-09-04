@@ -194,10 +194,14 @@ impl Strings {
 
     // ---- Incoming-call toast buttons ----------------------------------
 
+    /// Toast-button copy; the Windows 7 build draws no toasts (kept so both builds share one i18n table).
+    #[cfg_attr(legacy_win7, allow(dead_code))]
     pub fn call_answer(&self) -> String {
         self.pick("Answer", "الرد")
     }
 
+    /// Toast-button copy; the Windows 7 build draws no toasts (kept so both builds share one i18n table).
+    #[cfg_attr(legacy_win7, allow(dead_code))]
     pub fn call_decline(&self) -> String {
         self.pick("Decline", "رفض")
     }
@@ -208,6 +212,8 @@ impl Strings {
         self.pick("Download complete", "اكتمل التنزيل")
     }
 
+    /// Toast-button copy; the Windows 7 build draws no toasts (kept so both builds share one i18n table).
+    #[cfg_attr(legacy_win7, allow(dead_code))]
     pub fn download_reveal(&self) -> String {
         self.pick("Show in folder", "إظهار في المجلد")
     }

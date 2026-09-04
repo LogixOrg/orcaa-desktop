@@ -9,6 +9,15 @@ The release workflow's `manifest` job reads the `## <version>` section verbatim;
 no entry → users see the generic "Improvements and fixes." line and CI emits a
 warning. Adding the entry is part of the version-bump checklist in the README.
 
+## 1.4.0
+
+- Orcaa now runs on Windows 7. A dedicated build for Windows 7 SP1 counter PCs
+  (64-bit and 32-bit) with everything the register needs: silent receipt,
+  kitchen and label printing, the cash drawer, kiosk mode and automatic
+  updates. Notifications there appear inside Orcaa and flash the taskbar
+  instead of Windows toasts. Download it from orcaa.cloud/downloads.
+- Nothing changes on Windows 10 and 11, macOS or Linux.
+
 ## 1.3.4
 
 - One Orcaa app for everyone. The separate Orcaa Admin app is retired — sign in

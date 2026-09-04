@@ -848,11 +848,7 @@ pub fn shell_init_js(_strings: &Strings, webview_version: Option<&str>) -> Strin
         )
         .replace(
             "__LEGACY__",
-            if cfg!(legacy_win7) {
-                "true"
-            } else {
-                "false"
-            },
+            if cfg!(legacy_win7) { "true" } else { "false" },
         )
         .replace("__WEBVIEW__", &js_string(webview_version.unwrap_or("")))
 }
@@ -1053,6 +1049,36 @@ mod tests {
             !js.contains("__DEBUG__"),
             "the debug flag must be substituted"
         );
+    }
+
+    #[test]
+    fn the_injected_script_publishes_shell_facts_before_anything_else() {
+        // `isLegacyShell()` in the web app is a synchronous property read at
+        // module-evaluation time, so the global must be set before the first
+        // command could possibly be invoked — and both placeholders must be
+        // substituted, or the page would throw a ReferenceError at startup.
+        let js = shell_init_js(&strings(), Some("109.0.1518.140"));
+
+        let global = js
+            .find("window.__ORCAA_SHELL__")
+            .expect("the shell facts global must be published");
+        let first_invoke = js.find("invoke(").expect("the script invokes commands");
+        assert!(global < first_invoke, "shell facts must come first");
+
+        assert!(!js.contains("__LEGACY__") && !js.contains("__WEBVIEW__"));
+        assert!(js.contains(r#"webview: "109.0.1518.140""#));
+        assert!(
+            js.contains(if cfg!(legacy_win7) {
+                "legacy: true"
+            } else {
+                "legacy: false"
+            }),
+            "legacy must mirror the build's cfg"
+        );
+
+        // No version known → an empty string, never `undefined` or a bare hole.
+        let js = shell_init_js(&strings(), None);
+        assert!(js.contains(r#"webview: """#));
     }
 
     #[test]

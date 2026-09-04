@@ -50,6 +50,14 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # The Windows 7 code paths (`legacy_win7` cfg — taskbar flash instead of
+      # toasts, no notification plugin) are normally compiled only on the
+      # nightly win7 lane of the release workflow. `--features win7` turns the
+      # same cfg on with a stable toolchain so they can't rot between releases.
+      - name: clippy (Windows 7 code paths)
+        working-directory: src-tauri
+        run: cargo clippy --features win7 --all-targets -- -D warnings
+
       - name: tests
         working-directory: src-tauri
         run: cargo test
