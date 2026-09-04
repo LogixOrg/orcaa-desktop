@@ -522,14 +522,25 @@ jobs:
       # time. A raw cargo build without it would embed the bare tauri.conf.json
       # (empty endpoints, no `orcaa://` scheme). jq's `*` is a deep merge where
       # arrays are replaced — the same semantics the CLI uses.
+      #
+      # `working-directory: src-tauri` is load-bearing: cargo discovers
+      # `.cargo/config.toml` from the CURRENT DIRECTORY, not from
+      # `--manifest-path`. Run from the repo root and the win7 rustflags
+      # (`--cfg windows_slim_errors`, `+crt-static`) silently never apply — the
+      # exe then imports the UCRT through `api-ms-win-crt-*` and the audit below
+      # rejects it. (That is exactly what happened on the first CI run.)
       - name: Compile (${{ matrix.target }})
         shell: bash
+        working-directory: src-tauri
         run: |
           set -euo pipefail
-          TAURI_CONFIG="$(jq -cs '.[0] * .[1]' src-tauri/tauri.business.conf.json "src-tauri/tauri.win7-${{ matrix.arch }}.conf.json")"
+          TAURI_CONFIG="$(jq -cs '.[0] * .[1]' tauri.business.conf.json "tauri.win7-${{ matrix.arch }}.conf.json")"
           export TAURI_CONFIG
           export TAURI_ENV_TARGET_TRIPLE="${{ matrix.target }}"
-          cargo build --release --target "${{ matrix.target }}" --manifest-path src-tauri/Cargo.toml
+          # Prove the target-scoped rustflags are in effect before spending 7 minutes compiling.
+          cargo config get --format json-value "target.${{ matrix.target }}.rustflags" -Z unstable-options | grep -q "crt-static" \
+            || { echo "::error::src-tauri/.cargo/config.toml rustflags for ${{ matrix.target }} were not picked up by cargo."; exit 1; }
+          cargo build --release --target "${{ matrix.target }}"
 
       # NSIS only: the MSI lane is for IT-managed Win10/11 fleets, and the Win7
       # overlay's fixedRuntime block is what makes the installer self-contained.

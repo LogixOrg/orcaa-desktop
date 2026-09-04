@@ -139,7 +139,15 @@ foreach ($dll in $imports.Keys) {
 
     $denied = $deniedDllPatterns | Where-Object { $dll -match $_ } | Select-Object -First 1
     if ($denied) {
-        $problems.Add("DLL '$dll' does not exist on Windows 7 (matched $denied)")
+        if ($dll -like 'api-ms-win-crt-*') {
+            # This one has a single known cause worth naming: the target-scoped
+            # rustflags in src-tauri/.cargo/config.toml were not applied, so the
+            # CRT was linked dynamically. Cargo reads that file from the current
+            # directory, not from --manifest-path — build from inside src-tauri.
+            $problems.Add("DLL '$dll' does not exist on a fresh Windows 7 (UCRT via API sets). `+crt-static` was NOT applied: run cargo from inside src-tauri so .cargo/config.toml is picked up.")
+        } else {
+            $problems.Add("DLL '$dll' does not exist on Windows 7 (matched $denied)")
+        }
     } elseif ($allowedDlls -notcontains $dll) {
         $problems.Add("DLL '$dll' is not on the Windows 7 allowlist. Verify it ships with Win7 SP1 and extend the list, or remove the dependency.")
     }

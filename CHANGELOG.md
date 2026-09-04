@@ -9,7 +9,7 @@ The release workflow's `manifest` job reads the `## <version>` section verbatim;
 no entry → users see the generic "Improvements and fixes." line and CI emits a
 warning. Adding the entry is part of the version-bump checklist in the README.
 
-## 1.4.1
+## 1.4.2
 
 - Orcaa now runs on Windows 7. A dedicated build for Windows 7 SP1 counter PCs
   (64-bit and 32-bit) with everything the register needs: silent receipt,
