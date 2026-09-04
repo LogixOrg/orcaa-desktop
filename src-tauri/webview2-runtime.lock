@@ -1,0 +1,14 @@
+# WebView2 Runtime 109.0.1518.140 — the last version that runs on Windows 7.
+#
+# One line per architecture:  <arch>  <sha256>  <url>
+#
+# These are Microsoft's own "Microsoft Edge-WebView2 Runtime Version 109 Update"
+# packages from the Microsoft Update Catalog (search: "Microsoft Edge-WebView2
+# Runtime Version 109"), i.e. the Evergreen Standalone Installer, served from
+# Microsoft's windowsupdate.com CDN and Authenticode-signed by Microsoft
+# Corporation. The release workflow downloads each one, refuses it unless the
+# SHA-256 matches the pin below AND the Authenticode signature is a valid
+# Microsoft one, then ships it inside the Win7 installer (see
+# windows/win7-webview2.nsh). Pinned 2026-09-04 from files verified locally.
+x64  eac95c8095ec5f9971eade9827d8fb67fd251f5c16e702b5312d31067e39119b  https://catalog.s.download.windowsupdate.com/c/msdownload/update/software/updt/2023/09/microsoftedgestandaloneinstallerx64_1c890b4b8dd6b7c93da98ebdc08ecdc5e30e50cb.exe
+x86  60b22c71128f10abc5e92dd8fed90ff6ca55b8382ba01e48d87faf1664746a31  https://catalog.s.download.windowsupdate.com/c/msdownload/update/software/updt/2023/09/microsoftedgestandaloneinstallerx86_179f59bc54d73843d9288a9fd5609de0e507b911.exe

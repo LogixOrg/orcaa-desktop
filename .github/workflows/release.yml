@@ -370,9 +370,9 @@ jobs:
   #      `--cfg windows_slim_errors` + a static CRT (see the comments there).
   #   3. WebView2 on Win7 stops at runtime 109 and the evergreen bootstrapper
   #      is unreliable there (TLS 1.2 is often off; it may fetch 110+). The
-  #      installer therefore embeds the Fixed Version Runtime 109, fetched from
-  #      this repo's `webview2-fixed-109` release and verified against
-  #      src-tauri/webview2-fixed.sha256 before it is unpacked.
+  #      installer therefore carries Microsoft's own 109 standalone installer
+  #      (Update Catalog package, SHA-256 + Authenticode verified; see
+  #      src-tauri/webview2-runtime.lock) and runs it when no runtime exists.
   # An import audit (scripts/audit-win7-imports.ps1) then refuses to publish an
   # exe that imports anything Windows 7 does not have — the failure mode is
   # otherwise "the app won't start" on the customer's counter PC.
@@ -411,7 +411,7 @@ jobs:
       # Pin the date and bump it on purpose: a tier-3 target has no CI of its
       # own upstream, so a random nightly can break this lane silently.
       RUST_NIGHTLY: nightly-2026-08-20
-      WEBVIEW2_FIXED_VERSION: "109.0.1518.140"
+      WEBVIEW2_RUNTIME_VERSION: "109.0.1518.140"
 
     steps:
       - name: Checkout
@@ -446,37 +446,47 @@ jobs:
       - name: Generate icons
         run: pnpm tauri icon src-tauri/source-icons/business.png --output src-tauri/icons/business
 
-      # The last WebView2 that runs on Windows 7. Microsoft's download page
-      # only offers current versions, so the two cabs live as assets on this
-      # repo's `webview2-fixed-109` release (one-time upload, see README
-      # "Windows 7 build"). The pinned SHA-256 is what makes that trustworthy.
-      - name: Fetch WebView2 Fixed Version Runtime ${{ env.WEBVIEW2_FIXED_VERSION }} (${{ matrix.arch }})
+      # WebView2 109 is the last runtime that runs on Windows 7, and Microsoft's
+      # download page only offers current versions. The one official, still-served
+      # copy is the "Microsoft Edge-WebView2 Runtime Version 109 Update" package on
+      # the Microsoft Update Catalog — the Evergreen Standalone Installer, hosted on
+      # Microsoft's windowsupdate.com CDN. URL + SHA-256 per architecture are pinned
+      # in src-tauri/webview2-runtime.lock; the file is refused unless the hash
+      # matches AND Microsoft's Authenticode signature verifies. The Win7 overlay
+      # ships it as a bundle resource and windows/win7-webview2.nsh runs it at
+      # install time when no WebView2 Runtime is present (Microsoft's documented
+      # offline-deployment workflow).
+      - name: Download WebView2 Runtime ${{ env.WEBVIEW2_RUNTIME_VERSION }} standalone installer (${{ matrix.arch }})
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          CAB="Microsoft.WebView2.FixedVersionRuntime.${WEBVIEW2_FIXED_VERSION}.${{ matrix.arch }}.cab"
-          mkdir -p src-tauri/webview2-fixed
-          gh release download webview2-fixed-109 -R "$GITHUB_REPOSITORY" --pattern "$CAB" --dir src-tauri/webview2-fixed
-
-          ACTUAL=$(sha256sum "src-tauri/webview2-fixed/$CAB" | cut -d' ' -f1)
-          EXPECTED=$(grep -E "^[0-9a-fA-F]{64}\s+\*?${CAB//./\\.}\s*$" src-tauri/webview2-fixed.sha256 | awk '{print $1}' | head -1 || true)
-          if [[ -z "$EXPECTED" ]]; then
-            echo "::error::src-tauri/webview2-fixed.sha256 has no entry for $CAB. Its SHA-256 is $ACTUAL — add the line '$ACTUAL  $CAB' once you have verified the cab's origin."
-            exit 1
+          LOCK=src-tauri/webview2-runtime.lock
+          read -r EXPECTED URL < <(awk -v a="${{ matrix.arch }}" '$1 == a { print $2, $3 }' "$LOCK")
+          if [[ -z "${EXPECTED:-}" || -z "${URL:-}" ]]; then
+            echo "::error::$LOCK has no '${{ matrix.arch }}' line (format: <arch> <sha256> <url>)."; exit 1
           fi
+
+          DEST="src-tauri/webview2-runtime/${{ matrix.arch }}/MicrosoftEdgeWebView2RuntimeInstaller.exe"
+          mkdir -p "$(dirname "$DEST")"
+          curl -sSL --fail --retry 3 -o "$DEST" "$URL"
+
+          ACTUAL=$(sha256sum "$DEST" | cut -d' ' -f1)
           if [[ "${ACTUAL,,}" != "${EXPECTED,,}" ]]; then
-            echo "::error::$CAB does not match the pinned SHA-256 (got $ACTUAL, expected $EXPECTED). Refusing to bundle it."
+            echo "::error::WebView2 installer for ${{ matrix.arch }} does not match the pinned SHA-256 (got $ACTUAL, expected $EXPECTED). Refusing to bundle it."
             exit 1
           fi
-          echo "SHA-256 verified for $CAB"
+          echo "SHA-256 verified: $DEST"
 
-          # expand.exe keeps the cab's own folder name, which is exactly the
-          # path tauri.win7-<arch>.conf.json points at.
-          expand -F:'*' "src-tauri/webview2-fixed/$CAB" src-tauri/webview2-fixed >/dev/null
-          test -f "src-tauri/webview2-fixed/Microsoft.WebView2.FixedVersionRuntime.${WEBVIEW2_FIXED_VERSION}.${{ matrix.arch }}/msedgewebview2.exe"
-          echo "Fixed runtime unpacked."
+      # The pin proves it is the file we reviewed; this proves Microsoft signed it.
+      - name: Verify Microsoft's Authenticode signature on the installer
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/webview2-runtime/${{ matrix.arch }}/MicrosoftEdgeWebView2RuntimeInstaller.exe"
+          $sig = Get-AuthenticodeSignature -LiteralPath $exe
+          Write-Host ("Status: {0}`nSigner: {1}" -f $sig.Status, $sig.SignerCertificate.Subject)
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            Write-Error "The WebView2 installer is not validly signed by Microsoft Corporation. Refusing to bundle it."
+          }
 
       # Same optional Azure Trusted Signing as the main lane.
       - name: Enable Windows signing (only if secrets are configured)

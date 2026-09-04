@@ -34,7 +34,8 @@ All of them build from the same tag push — one workflow, one GitHub release.
   Evergreen runtime, preinstalled on these versions; the installer fetches it if missing.
 - **Windows 7 SP1, 64-bit or 32-bit** — the legacy build (`orcaa-desktop-win7.exe` /
   `orcaa-desktop-win7-x86.exe`). Self-contained: it carries WebView2 **109.0.1518.140**, the last runtime
-  Microsoft shipped for Windows 7, so it installs offline and needs no TLS 1.2 fix-ups. The one OS
+  Microsoft shipped for Windows 7 (Microsoft's own standalone installer, run by the setup only when no
+  runtime is present), so it installs offline and needs no TLS 1.2 fix-ups. The one OS
   prerequisite is Windows Update applied through 2013: Microsoft's own WebView2 loader imports
   `EventSetInformation`, which Windows 7 SP1 gained with **KB2882822** (the import audit prints this as a
   warning on every build). Trade-offs, stated
@@ -471,7 +472,7 @@ its cost — but three facts about the platform force every choice below. Nothin
 | **Rust ≥ 1.78 binaries need Windows 10.** The only supported route is the tier-3 target `x86_64-win7-windows-msvc` / `i686-win7-windows-msvc`, which ships no prebuilt std. | The lane builds on a **pinned nightly** with `-Zbuild-std=std,panic_abort` (`CARGO_UNSTABLE_BUILD_STD` in the workflow; deliberately *not* in `.cargo/config.toml`, so stable builds stay untouched). Same crate, same `Cargo.lock`. |
 | **Windows 7 has no `combase.dll` (WinRT).** An exe that statically imports it fails to *load*. | `Cargo.toml` selects `tauri-plugin-notification` / `tauri-winrt-notification` only for `cfg(not(target_vendor = "win7"))`; `build.rs` turns those triples into the `legacy_win7` cfg the source branches on; `.cargo/config.toml` adds `--cfg windows_slim_errors` (drops `windows-result`'s `RoOriginateErrorW`) and a static CRT. `cargo clippy --features win7` previews the same cfg on stable — CI runs it. |
 | **`ctor` 0.8.0 (via tauri-utils) only knows Windows as `target_vendor = "pc"`** and hard-errors on the win7 triples, whose vendor is `win7`. | [`src-tauri/patches/ctor`](src-tauri/patches/ctor/PATCH-NOTES.md) is the crates.io 0.8.0 release with that one cfg widened, wired through `[patch.crates-io]`. It resolves to the same version, so every other platform compiles identical code. (ctor 1.0.x upstream already gates on `target_os = "windows"`; drop the patch when tauri-utils moves to it.) |
-| **WebView2 on Windows 7 stops at 109.0.1518.140** and the evergreen bootstrapper is unreliable there. | `tauri.win7-{x64,x86}.conf.json` switch `webviewInstallMode` to `fixedRuntime` and bundle the Fixed Version Runtime. The cabs live as assets on this repo's **`webview2-fixed-109` release** (one-time upload of the two Microsoft cabs, x64 + x86); the workflow verifies each against [`src-tauri/webview2-fixed.sha256`](src-tauri/webview2-fixed.sha256) before `expand`ing it into `src-tauri/webview2-fixed/` (gitignored). No hash line → the build fails and prints the hash it saw. |
+| **WebView2 on Windows 7 stops at 109.0.1518.140** and the evergreen bootstrapper is unreliable there (TLS 1.2 often off; it may fetch 110+). Microsoft's download page only offers current versions. | The one official, still-served copy of 109 is the **"Microsoft Edge-WebView2 Runtime Version 109 Update"** package on the Microsoft Update Catalog (the Evergreen Standalone Installer, Microsoft-signed, on the windowsupdate.com CDN). URL + SHA-256 per architecture are pinned in [`src-tauri/webview2-runtime.lock`](src-tauri/webview2-runtime.lock); the workflow downloads it, refuses it unless the hash matches **and** `Get-AuthenticodeSignature` says Microsoft Corporation, and the `tauri.win7-{x64,x86}.conf.json` overlays ship it as a bundle resource (`webviewInstallMode: skip`). [`src-tauri/windows/win7-webview2.nsh`](src-tauri/windows/win7-webview2.nsh) is an NSIS `NSIS_HOOK_POSTINSTALL` that follows Microsoft's documented offline workflow: read the `pv` registry value, run the installer with `/silent /install` only when no runtime exists, then delete the 140 MB file. No manual asset upload anywhere. |
 
 Then [`scripts/audit-win7-imports.ps1`](scripts/audit-win7-imports.ps1) runs `dumpbin /IMPORTS` on the
 built exe and fails the job on any DLL or entry point Windows 7 does not have (`combase.dll`,
@@ -483,8 +484,10 @@ locally too — it is the difference between "it built" and "it starts on the cu
 ```powershell
 rustup toolchain install nightly-2026-08-20 --component rust-src
 $env:CARGO_UNSTABLE_BUILD_STD = "std,panic_abort"
-# The fixed runtime must ALREADY be unpacked under src-tauri/webview2-fixed/ — tauri-build
-# embeds it as a resource, so even the compile step checks the folder exists.
+# The WebView2 109 standalone installer must ALREADY be at
+# src-tauri/webview2-runtime/x64/MicrosoftEdgeWebView2RuntimeInstaller.exe (URL + SHA-256 in
+# src-tauri/webview2-runtime.lock) — it is a bundle resource, and tauri-build checks resources exist
+# at compile time.
 # The merged config MUST reach cargo: generate_context!() bakes the updater endpoint,
 # deep-link scheme and icons in at compile time (this is what `tauri build --config` does).
 $env:TAURI_CONFIG = (jq -cs '.[0] * .[1]' tauri.business.conf.json tauri.win7-x64.conf.json)
@@ -497,7 +500,8 @@ cd ..; pnpm tauri bundle --target x86_64-win7-windows-msvc --config src-tauri/ta
 
 Spike log (2026-09-04, x64 + x86 debug builds on this recipe): compiles and links; the import audit is
 clean apart from the `EventSetInformation` warning above; `tauri bundle` accepts the triple, patches the
-exe and derives the `x64`/`x86` arch, and stops exactly at the missing fixed-runtime folder.
+exe and derives the `x64`/`x86` arch, and produces the NSIS installer with the WebView2 109 standalone
+installer bundled (see the Verification list for what the VM run must still prove).
 
 **Verify on a real Windows 7 SP1 VM before tagging** — a fresh one, without the UCRT update and with TLS
 1.2 off, since that is what the field looks like: install, sign in through the browser hand-off, load a
