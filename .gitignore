@@ -38,3 +38,9 @@ Thumbs.db
 # Env
 .env
 .env.*
+
+# WebView2 Fixed Version Runtime 109 (the last one that runs on Windows 7),
+# ~150 MB per architecture. Fetched by the release workflow from the
+# `webview2-fixed-109` release assets and verified against
+# src-tauri/webview2-fixed.sha256 — never committed.
+src-tauri/webview2-fixed/

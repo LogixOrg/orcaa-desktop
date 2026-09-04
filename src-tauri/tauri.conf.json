@@ -9,7 +9,8 @@
   },
   "app": {
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": ["default", "remote-webview"]
     }
   },
   "plugins": {

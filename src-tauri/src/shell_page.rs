@@ -741,6 +741,16 @@ pub fn autostart_prompt_page_html(strings: &Strings) -> String {
 const INIT_JS: &str = r#"
 (() => {
   const DEBUG = __DEBUG__;
+
+  // --- shell facts the web app may branch on ------------------------------
+  // Set synchronously at document-start, before a line of the app runs, so
+  // `isLegacyShell()` is a plain property read — no command round-trip, no
+  // capability to grant. `legacy` is true only in the Windows 7 build, where
+  // WebView2 is pinned at 109 and the OS has no toast centre; the app uses it
+  // to skip the notification plugin (not compiled in there) and to show its
+  // one-time compatibility notice. `webview` is the runtime version string.
+  window.__ORCAA_SHELL__ = Object.freeze({ legacy: __LEGACY__, webview: __WEBVIEW__ });
+
   const invoke = (cmd, args) => {
     try { return window.__TAURI_INTERNALS__.invoke(cmd, args || {}); }
     catch (_) { return Promise.resolve(); }
@@ -822,16 +832,29 @@ const INIT_JS: &str = r#"
 "#;
 
 /// The script injected into every page the main window loads, including the
-/// remote app.
-pub fn shell_init_js(_strings: &Strings) -> String {
-    INIT_JS.replace(
-        "__DEBUG__",
-        if cfg!(debug_assertions) {
-            "true"
-        } else {
-            "false"
-        },
-    )
+/// remote app. `webview_version` is the runtime's version string when Tauri
+/// could read it (`tauri::webview_version()`); it is exposed to the app as a
+/// string literal, so it goes through the same escaping as every other value
+/// that lands in a script.
+pub fn shell_init_js(_strings: &Strings, webview_version: Option<&str>) -> String {
+    INIT_JS
+        .replace(
+            "__DEBUG__",
+            if cfg!(debug_assertions) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "__LEGACY__",
+            if cfg!(legacy_win7) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace("__WEBVIEW__", &js_string(webview_version.unwrap_or("")))
 }
 
 #[cfg(test)]
@@ -904,7 +927,7 @@ mod tests {
         // Window chrome / topbar is owned and drawn entirely by the frontend web apps
         // (AppTopbar + WindowControls). The desktop shell must not inject a duplicate
         // titlebar into the webview.
-        let js = shell_init_js(&strings());
+        let js = shell_init_js(&strings(), None);
         assert!(!js.contains("orcaa-shell-titlebar"));
         assert!(!js.contains("drag-edge"));
 
@@ -1019,7 +1042,7 @@ mod tests {
 
     #[test]
     fn the_injected_script_only_claims_modified_keys() {
-        let js = shell_init_js(&strings());
+        let js = shell_init_js(&strings(), None);
 
         // A bare-key binding here would shadow the app's own "/" search.
         assert!(js.contains("e.ctrlKey || e.metaKey"));
@@ -1038,7 +1061,7 @@ mod tests {
         // `contextmenu` listener here runs BEFORE the app's `useGlobalContextMenu`
         // — and the moment it calls `preventDefault()` the app's handler sees
         // `defaultPrevented` and bails, leaving the page with no menu at all.
-        let js = shell_init_js(&strings());
+        let js = shell_init_js(&strings(), None);
 
         assert!(
             !js.contains("addEventListener('contextmenu'"),
@@ -1060,7 +1083,7 @@ mod tests {
         // A full reload throws away React state and every warm query for what
         // the user meant as "refresh"; the app re-pulls data instead. The hard
         // reload stays available on Ctrl+Shift+R.
-        let js = shell_init_js(&strings());
+        let js = shell_init_js(&strings(), None);
 
         assert!(
             js.contains("orcaa:refresh"),

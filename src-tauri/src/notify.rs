@@ -20,9 +20,16 @@
 //!
 //! Everywhere else this falls back to the plugin: a toast with no click
 //! handling is still better than no toast.
+//!
+//! **Windows 7** (`legacy_win7` builds) has neither: no toast centre, and no
+//! `combase.dll` for the WinRT crates to bind, so neither crate is compiled in.
+//! There `shell_notify` flashes the taskbar button and reports `false` — the
+//! web app dispatches its in-app banner and chime *before* asking the shell,
+//! so the message is never lost, it just isn't drawn by the OS.
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
+#[cfg(not(legacy_win7))]
 use tauri_plugin_notification::NotificationExt;
 use url::Url;
 
@@ -87,7 +94,7 @@ fn activate(app: &AppHandle, target: Option<Url>) {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(legacy_win7)))]
 fn show_windows(app: &AppHandle, payload: &NotifyPayload, strings: &Strings) -> bool {
     use tauri_winrt_notification::{Scenario, Toast};
 
@@ -144,6 +151,29 @@ fn show_windows(app: &AppHandle, payload: &NotifyPayload, strings: &Strings) -> 
     }
 }
 
+/// Windows 7: no toast centre exists, so the taskbar button flashes instead
+/// (the classic "something needs you" signal) and the web app keeps its in-app
+/// banner + chime. An incoming call is the one case worth more than a flash:
+/// if the app is hidden in the tray there is no taskbar button to flash, so
+/// the window is brought back minimised — present on the taskbar, still not in
+/// anyone's face — before flashing.
+#[cfg(all(windows, legacy_win7))]
+fn show_windows(app: &AppHandle, payload: &NotifyPayload, _strings: &Strings) -> bool {
+    if Kind::parse(payload.kind.as_deref()) == Kind::IncomingCall {
+        if let Some(window) = app.get_webview_window("main") {
+            if !window.is_visible().unwrap_or(true) {
+                let _ = window.show();
+                let _ = window.minimize();
+            }
+        }
+    }
+
+    crate::flash_main_window(app);
+    // Nothing was *shown*: the caller must not treat the flash as a delivered
+    // message. (The web app dispatched its banner before asking us anyway.)
+    false
+}
+
 /// Sends a toast. Returns `false` if nothing could be shown, so the web app can
 /// tell "shown" from "silently dropped".
 #[tauri::command]
@@ -163,18 +193,30 @@ pub fn shell_notify(app: AppHandle, payload: NotifyPayload) -> bool {
     // macOS and Linux, and any Windows toast that failed to build: a plain
     // toast with no click handling still beats none.
     let _ = &strings;
-    match app
-        .notification()
-        .builder()
-        .title(&payload.title)
-        .body(&payload.body)
-        .show()
+    #[cfg(not(legacy_win7))]
     {
-        Ok(()) => true,
-        Err(err) => {
-            log::warn!("failed to show notification: {err}");
-            false
+        match app
+            .notification()
+            .builder()
+            .title(&payload.title)
+            .body(&payload.body)
+            .show()
+        {
+            Ok(()) => true,
+            Err(err) => {
+                log::warn!("failed to show notification: {err}");
+                false
+            }
         }
+    }
+
+    // Windows 7 build: no notification plugin to fall back to. The taskbar
+    // flash above is all the OS can do; honestly report "not shown".
+    #[cfg(legacy_win7)]
+    {
+        let _ = &app;
+        let _ = &payload;
+        false
     }
 }
 

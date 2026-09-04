@@ -21,6 +21,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_deep_link::DeepLinkExt;
+#[cfg(not(legacy_win7))]
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_store::StoreExt;
@@ -261,6 +262,38 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Windows 7 has no toast centre, so "something happened" is signalled the way
+/// every classic app does it: the taskbar button flashes until the window is
+/// brought forward. Only the taskbar button — the window itself is left where
+/// it is, so a cashier mid-sale is never interrupted. The web app's in-app
+/// banner and chime carry the actual message.
+#[cfg(all(windows, legacy_win7))]
+pub(crate) fn flash_main_window(app: &AppHandle) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG,
+    };
+
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return;
+    };
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+
+    let info = FLASHWINFO {
+        cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd,
+        dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
+    // SAFETY: `info` is a fully initialised FLASHWINFO whose hwnd came from the
+    // live window; FlashWindowEx only reads it.
+    unsafe {
+        FlashWindowEx(&info);
+    }
+}
+
 /// The global summon shortcut's behaviour: bring the app forward, unless it is
 /// already the thing in front — then put it away again.
 fn toggle_main_window(app: &AppHandle) {
@@ -426,10 +459,23 @@ struct AppUrls {
     base_domain: String,
 }
 
+#[cfg(not(legacy_win7))]
 pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
     if let Err(err) = app.notification().builder().title(title).body(body).show() {
         log::warn!("failed to show notification: {err}");
     }
+}
+
+/// Windows 7: no notification plugin in this build (it binds WinRT). The
+/// shell's own messages — update failed, download failed — go to the log and
+/// flash the taskbar; the update window itself still shows its own state.
+#[cfg(legacy_win7)]
+pub(crate) fn notify(app: &AppHandle, title: &str, body: &str) {
+    log::info!("notification (no toast centre on Windows 7): {title} — {body}");
+    #[cfg(windows)]
+    flash_main_window(app);
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// Persists everything the next launch needs to feel continuous: the page the
@@ -775,7 +821,7 @@ fn on_download_event(app: &AppHandle, event: DownloadEvent<'_>) -> bool {
     true
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(legacy_win7)))]
 fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, path: std::path::PathBuf) {
     use tauri_winrt_notification::Toast;
 
@@ -796,7 +842,9 @@ fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, path: std::path:
     }
 }
 
-#[cfg(not(windows))]
+/// macOS/Linux, and Windows 7 (no WinRT toast, so no "Show in folder"
+/// button — the file still lands in Downloads as usual).
+#[cfg(any(not(windows), legacy_win7))]
 fn reveal_toast(app: &AppHandle, strings: &Strings, name: &str, _path: std::path::PathBuf) {
     notify(app, &strings.download_done_title(), name);
 }
@@ -814,7 +862,7 @@ pub fn run() {
         log::error!("PANIC (shell is about to abort): {info}");
     }));
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Serves the shell's own pages. Everything they need is derived from
         // config or managed state here rather than carried in the URL, so a
         // stale URL can never describe something that is no longer true.
@@ -901,14 +949,21 @@ pub fn run() {
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
         // Opt-in, off until the user ticks the tray item. `--hidden` so a
         // machine that boots straight into Orcaa lands in the tray rather than
         // throwing a window in front of whoever is signing in.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
-        ))
+        ));
+
+    // Not compiled into the Windows 7 build: the plugin's Windows backend is
+    // WinRT (`combase.dll`), which Windows 7 does not have — linking it would
+    // stop the exe from loading at all. notify.rs carries the Win7 fallback.
+    #[cfg(not(legacy_win7))]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             signin_start,
             shell_reload,
@@ -1035,7 +1090,10 @@ pub fn run() {
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                  --autoplay-policy=no-user-gesture-required",
             )
-            .initialization_script(shell_init_js(&strings))
+            .initialization_script(shell_init_js(
+                &strings,
+                tauri::webview_version().ok().as_deref(),
+            ))
             .on_download(|webview, event| on_download_event(&webview.app_handle().clone(), event))
             .on_navigation(move |url| {
                 // Logging out, or a session expiring, lands here. Show the

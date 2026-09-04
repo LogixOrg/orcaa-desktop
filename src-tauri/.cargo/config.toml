@@ -1,0 +1,20 @@
+# Windows 7 legacy lane. These tables only apply when cargo is building the
+# matching target triple, so every other build (Win10/11, macOS, Linux, CI
+# clippy) is untouched by this file.
+#
+# - `windows_slim_errors`: `windows-result` otherwise calls `RoOriginateErrorW`
+#   from `api-ms-win-core-winrt-error-l1-1-0.dll`, an API set Windows 7 does not
+#   have — the exe would fail to load before `main`. The cfg swaps it for a
+#   plain HRESULT.
+# - `+crt-static`: links the UCRT statically so a fresh Win7 SP1 without
+#   KB2999226 (the "Universal C Runtime" update) still starts.
+#
+# `-Zbuild-std` is deliberately NOT here: the tier-3 win7 targets ship no
+# prebuilt std, so the release workflow passes
+# `CARGO_UNSTABLE_BUILD_STD=std,panic_abort` on a pinned nightly instead of
+# committing an `[unstable]` table that would break every stable build.
+[target.x86_64-win7-windows-msvc]
+rustflags = ["--cfg", "windows_slim_errors", "-C", "target-feature=+crt-static"]
+
+[target.i686-win7-windows-msvc]
+rustflags = ["--cfg", "windows_slim_errors", "-C", "target-feature=+crt-static"]

@@ -1,0 +1,46 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-webview-win7",
+  "description": "Windows 7 twin of `remote.json` — same remote origins, same grants, minus `notification:default` (the notification plugin is not compiled into the Win7 build; `shell_notify` still is, and on Win7 it flashes the taskbar button while the web app's in-app banner carries the message). Keep in step with `remote.json`.",
+  "local": false,
+  "remote": {
+    "urls": [
+      "https://orcaa.cloud",
+      "https://*.orcaa.cloud",
+      "http://orcaa.test",
+      "http://*.orcaa.test",
+      "https://orcaa.test",
+      "https://*.orcaa.test"
+    ]
+  },
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-shell-controls",
+    "allow-shell-notify",
+    "allow-shell-window",
+    "allow-shell-badge",
+    "allow-shell-pos",
+    "allow-shell-kitchen",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*"
+        },
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "mailto:*"
+        },
+        {
+          "url": "tel:*"
+        }
+      ]
+    }
+  ]
+}

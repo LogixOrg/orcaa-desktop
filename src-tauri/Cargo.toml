@@ -12,11 +12,20 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+# Preview switch ONLY — compiles the Windows 7 code paths on a stable
+# toolchain so CI's clippy keeps them honest (`cargo clippy --features win7`).
+# A shipping Win7 build never passes this flag: build.rs turns the same cfg on
+# from the target triple (`*-win7-windows-msvc`), and the WinRT dependencies
+# below drop out of the graph by `target_vendor`, which a feature cannot do
+# (features are additive; the tauri CLI has no `--no-default-features`).
+win7 = []
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-notification = "2"
 tauri-plugin-store = "2"
 # `deep-link` feature is required on Windows/Linux: the OS launches a NEW
 # process with the orcaa:// URL as a CLI argument instead of signalling the
@@ -51,16 +60,30 @@ lto = true
 opt-level = "s"
 strip = true
 
-[target."cfg(windows)".dependencies]
+# Windows 7 has no toast centre and no `combase.dll`: both crates below bind
+# WinRT statically, so a binary that links them fails to LOAD there ("entry
+# point not found") before a line of ours runs. The Win7 build (target vendor
+# `win7`) therefore leaves them out entirely and notify.rs falls back to a
+# taskbar flash + the web app's own in-app banner. `Cargo.lock` is target-
+# agnostic, so this changes nothing for the ordinary Windows 10/11 build.
+[target.'cfg(not(target_vendor = "win7"))'.dependencies]
+tauri-plugin-notification = "2"
+
+[target.'cfg(all(windows, not(target_vendor = "win7")))'.dependencies]
 tauri-winrt-notification = "0.7"
+
+[target."cfg(windows)".dependencies]
 # Receipt printing over the Windows print spooler in RAW mode — the transport
 # every USB-only thermal printer needs (most of them). Only the printing and
 # foundation surfaces; the version already resolves in the lock file.
 # PRINTER_INFO_2W (the level that carries the DRIVER name, which is what
 # identifies a thermal printer) is gated behind the Security + Gdi features.
+# `Win32_UI_WindowsAndMessaging` is for `FlashWindowEx`, the Windows 7
+# stand-in for a toast (classic user32, present since XP).
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Printing",
     "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
 ] }
