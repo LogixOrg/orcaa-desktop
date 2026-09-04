@@ -284,10 +284,14 @@ jobs:
           releaseBody: |
             Auto-generated release built from `${{ github.sha }}`.
 
-            **Windows**
+            **Windows 10 / 11**
             - **`${{ steps.app.outputs.stable_exe }}`** — stable filename used by the landing site / direct download (NSIS installer wizard)
             - `*_x64-setup.exe` — same NSIS installer, versioned filename
             - `*_x64_en-US.msi` — Windows Installer for IT-managed installs
+
+            **Windows 7 SP1** (legacy build — bundles WebView2 109, the last runtime for Windows 7; larger download, no OS toasts)
+            - **`orcaa-desktop-win7.exe`** (64-bit) / **`orcaa-desktop-win7-x86.exe`** (32-bit) — stable filenames used by the landing site
+            - `*_x64-win7-setup.exe` / `*_x86-win7-setup.exe` — same installers, versioned filenames; updates come from `latest-win7.json`
 
             **macOS** (universal — Intel + Apple Silicon, macOS 10.15+)
             - **`${{ steps.app.outputs.stable_dmg }}`** — stable filename used by the landing site / direct download
@@ -497,9 +501,32 @@ jobs:
           echo "WIN_SIGN_ARGS=--config src-tauri/tauri.windows-sign.conf.json" >> "$GITHUB_ENV"
           echo "Windows Authenticode signing enabled (Azure Trusted Signing)."
 
+      # Two steps instead of one `tauri build`: the CLI validates `--target`
+      # against `rustup target list`, which never lists tier-3 targets, so it
+      # refuses the win7 triples outright. `tauri bundle` has no such check —
+      # so cargo compiles, the CLI packages.
+      #
+      # `TAURI_CONFIG` matters: `tauri build --config` hands cargo the MERGED
+      # config through that variable, and `generate_context!()` bakes the
+      # updater endpoint, deep-link scheme and icons into the exe at compile
+      # time. A raw cargo build without it would embed the bare tauri.conf.json
+      # (empty endpoints, no `orcaa://` scheme). jq's `*` is a deep merge where
+      # arrays are replaced — the same semantics the CLI uses.
+      - name: Compile (${{ matrix.target }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAURI_CONFIG="$(jq -cs '.[0] * .[1]' src-tauri/tauri.business.conf.json "src-tauri/tauri.win7-${{ matrix.arch }}.conf.json")"
+          export TAURI_CONFIG
+          export TAURI_ENV_TARGET_TRIPLE="${{ matrix.target }}"
+          cargo build --release --target "${{ matrix.target }}" --manifest-path src-tauri/Cargo.toml
+
       # NSIS only: the MSI lane is for IT-managed Win10/11 fleets, and the Win7
       # overlay's fixedRuntime block is what makes the installer self-contained.
-      - name: Build (${{ matrix.target }})
+      # Signs the updater artifact (TAURI_SIGNING_*) and, when the Azure
+      # secrets exist, Authenticode-signs through the same overlay as the main
+      # lane.
+      - name: Bundle (${{ matrix.target }})
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -509,7 +536,7 @@ jobs:
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          pnpm tauri build \
+          pnpm tauri bundle --ci \
             --target "${{ matrix.target }}" \
             --config src-tauri/tauri.business.conf.json \
             --config "src-tauri/tauri.win7-${{ matrix.arch }}.conf.json" \

@@ -34,7 +34,10 @@ All of them build from the same tag push — one workflow, one GitHub release.
   Evergreen runtime, preinstalled on these versions; the installer fetches it if missing.
 - **Windows 7 SP1, 64-bit or 32-bit** — the legacy build (`orcaa-desktop-win7.exe` /
   `orcaa-desktop-win7-x86.exe`). Self-contained: it carries WebView2 **109.0.1518.140**, the last runtime
-  Microsoft shipped for Windows 7, so it installs offline and needs no TLS 1.2 fix-ups. Trade-offs, stated
+  Microsoft shipped for Windows 7, so it installs offline and needs no TLS 1.2 fix-ups. The one OS
+  prerequisite is Windows Update applied through 2013: Microsoft's own WebView2 loader imports
+  `EventSetInformation`, which Windows 7 SP1 gained with **KB2882822** (the import audit prints this as a
+  warning on every build). Trade-offs, stated
   plainly to users on the downloads page: Chromium 109 receives **no further security updates**, the
   installer is ~150 MB larger, and Windows 7 has no toast centre — notifications show inside Orcaa and flash
   the taskbar button instead. Everything else (printing, cash drawer, badge, kiosk, deep links, updater) is
@@ -248,12 +251,14 @@ it the frameless update window's `data-tauri-drag-region` header cannot be dragg
 Note `https://*.orcaa.cloud` does **not** match the apex `https://orcaa.cloud` — that URL is listed
 separately (URLPattern semantics).
 
-**Windows 7 twins.** `capabilities/default-win7.json` and `capabilities/remote-win7.json` are copies of
+**Windows 7 twins.** `capabilities-win7/default.json` and `capabilities-win7/remote.json` are copies of
 the two files above minus `notification:default` — the notification plugin isn't registered in the Win7
-build, and Tauri's ACL rejects a capability that names a permission from an absent plugin. Which pair a
-build uses is chosen explicitly through `app.security.capabilities` (`tauri.conf.json` lists
-`["default", "remote-webview"]`; the `tauri.win7-*.conf.json` overlays replace that with the `-win7`
-pair). **Any permission you add to `default.json` / `remote.json` goes into the twin too**, unless it
+build, and Tauri's ACL resolver parses every file under its pattern (before the enabled list is applied)
+and rejects a permission from an absent plugin. So the Win7 build reads its own directory: `build.rs`
+points tauri-build at `capabilities-win7/*.json` whenever the `legacy_win7` cfg is on. No
+`app.security.capabilities` list is set anywhere on purpose — every file in the selected directory is
+enabled, so each build is self-consistent without a config override (an explicit list naming `default`
+would break the Win7 build, whose twin is `default-win7`). **Any permission you add to `default.json` / `remote.json` goes into the twin too**, unless it
 comes from a plugin the Win7 build leaves out.
 
 Windows toasts additionally need the installed app's Start Menu shortcut to carry
@@ -465,6 +470,7 @@ its cost — but three facts about the platform force every choice below. Nothin
 | ---- | ------------------------ |
 | **Rust ≥ 1.78 binaries need Windows 10.** The only supported route is the tier-3 target `x86_64-win7-windows-msvc` / `i686-win7-windows-msvc`, which ships no prebuilt std. | The lane builds on a **pinned nightly** with `-Zbuild-std=std,panic_abort` (`CARGO_UNSTABLE_BUILD_STD` in the workflow; deliberately *not* in `.cargo/config.toml`, so stable builds stay untouched). Same crate, same `Cargo.lock`. |
 | **Windows 7 has no `combase.dll` (WinRT).** An exe that statically imports it fails to *load*. | `Cargo.toml` selects `tauri-plugin-notification` / `tauri-winrt-notification` only for `cfg(not(target_vendor = "win7"))`; `build.rs` turns those triples into the `legacy_win7` cfg the source branches on; `.cargo/config.toml` adds `--cfg windows_slim_errors` (drops `windows-result`'s `RoOriginateErrorW`) and a static CRT. `cargo clippy --features win7` previews the same cfg on stable — CI runs it. |
+| **`ctor` 0.8.0 (via tauri-utils) only knows Windows as `target_vendor = "pc"`** and hard-errors on the win7 triples, whose vendor is `win7`. | [`src-tauri/patches/ctor`](src-tauri/patches/ctor/PATCH-NOTES.md) is the crates.io 0.8.0 release with that one cfg widened, wired through `[patch.crates-io]`. It resolves to the same version, so every other platform compiles identical code. (ctor 1.0.x upstream already gates on `target_os = "windows"`; drop the patch when tauri-utils moves to it.) |
 | **WebView2 on Windows 7 stops at 109.0.1518.140** and the evergreen bootstrapper is unreliable there. | `tauri.win7-{x64,x86}.conf.json` switch `webviewInstallMode` to `fixedRuntime` and bundle the Fixed Version Runtime. The cabs live as assets on this repo's **`webview2-fixed-109` release** (one-time upload of the two Microsoft cabs, x64 + x86); the workflow verifies each against [`src-tauri/webview2-fixed.sha256`](src-tauri/webview2-fixed.sha256) before `expand`ing it into `src-tauri/webview2-fixed/` (gitignored). No hash line → the build fails and prints the hash it saw. |
 
 Then [`scripts/audit-win7-imports.ps1`](scripts/audit-win7-imports.ps1) runs `dumpbin /IMPORTS` on the
@@ -477,11 +483,21 @@ locally too — it is the difference between "it built" and "it starts on the cu
 ```powershell
 rustup toolchain install nightly-2026-08-20 --component rust-src
 $env:CARGO_UNSTABLE_BUILD_STD = "std,panic_abort"
+# The fixed runtime must ALREADY be unpacked under src-tauri/webview2-fixed/ — tauri-build
+# embeds it as a resource, so even the compile step checks the folder exists.
+# The merged config MUST reach cargo: generate_context!() bakes the updater endpoint,
+# deep-link scheme and icons in at compile time (this is what `tauri build --config` does).
+$env:TAURI_CONFIG = (jq -cs '.[0] * .[1]' tauri.business.conf.json tauri.win7-x64.conf.json)
 cargo +nightly-2026-08-20 build --release --target x86_64-win7-windows-msvc
 ..\scripts\audit-win7-imports.ps1 -Exe target\x86_64-win7-windows-msvc\release\orcaa-desktop.exe
-# full installer (needs the fixed runtime unpacked under src-tauri/webview2-fixed/ first):
-pnpm tauri build --target x86_64-win7-windows-msvc --config src-tauri/tauri.business.conf.json --config src-tauri/tauri.win7-x64.conf.json --bundles nsis
+# Installer. NOT `tauri build`: the CLI validates --target against `rustup target list`, which
+# never lists tier-3 targets, and refuses the triple. `tauri bundle` packages a cargo-built exe.
+cd ..; pnpm tauri bundle --target x86_64-win7-windows-msvc --config src-tauri/tauri.business.conf.json --config src-tauri/tauri.win7-x64.conf.json --bundles nsis
 ```
+
+Spike log (2026-09-04, x64 + x86 debug builds on this recipe): compiles and links; the import audit is
+clean apart from the `EventSetInformation` warning above; `tauri bundle` accepts the triple, patches the
+exe and derives the `x64`/`x86` arch, and stops exactly at the missing fixed-runtime folder.
 
 **Verify on a real Windows 7 SP1 VM before tagging** — a fresh one, without the UCRT update and with TLS
 1.2 off, since that is what the field looks like: install, sign in through the browser hand-off, load a

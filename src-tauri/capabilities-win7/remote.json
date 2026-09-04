@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-webview-win7",
-  "description": "Windows 7 twin of `remote.json` — same remote origins, same grants, minus `notification:default` (the notification plugin is not compiled into the Win7 build; `shell_notify` still is, and on Win7 it flashes the taskbar button while the web app's in-app banner carries the message). Keep in step with `remote.json`.",
+  "description": "Windows 7 twin of `../capabilities/remote.json`, read INSTEAD of it by the Win7 build (build.rs points tauri-build at this directory) — same remote origins, same grants, minus `notification:default` (the notification plugin is not compiled into the Win7 build; `shell_notify` still is, and on Win7 it flashes the taskbar button while the web app's in-app banner carries the message). Keep in step with `../capabilities/remote.json`.",
   "local": false,
   "remote": {
     "urls": [

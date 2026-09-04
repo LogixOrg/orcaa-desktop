@@ -113,13 +113,23 @@ $deniedFunctions = @(
     "GetDpiForMonitor", "GetDpiForSystem", "AdjustWindowRectExForDpi",
     "EnableNonClientDpiScaling", "SetThreadDpiAwarenessContext",
     "WaitOnAddress", "WakeByAddressSingle", "WakeByAddressAll",
-    "GetSystemTimePreciseAsFileTime", "TryAcquireSRWLockExclusive",
-    "TryAcquireSRWLockShared", "GetOverlappedResultEx", "PrefetchVirtualMemory",
+    # NOTE: TryAcquireSRWLock{Exclusive,Shared}, GetTouchInputInfo, ChangeWindowMessageFilterEx and
+    # SetWindowDisplayAffinity were INTRODUCED in Windows 7 — do not list them.
+    "GetSystemTimePreciseAsFileTime", "GetOverlappedResultEx", "PrefetchVirtualMemory",
     "CreateFile2", "GetTempPath2W", "SetDefaultDllDirectories"
 )
 
+# Exported by Windows 7 SP1 only after a specific Windows Update. Reported as a
+# WARNING, not a failure: the import is legitimate (it comes from Microsoft's own
+# WebView2LoaderStatic.lib), but a never-updated Win7 install will not start the
+# app — the README's system requirements name the update for that reason.
+$warnFunctions = @{
+    "EventSetInformation" = "needs KB2882822 (2013) on Windows 7 SP1 - imported by Microsoft's WebView2LoaderStatic.lib"
+}
+
 # --- report + verdict ---------------------------------------------------------
 $problems = New-Object System.Collections.Generic.List[string]
+$warnings = New-Object System.Collections.Generic.List[string]
 
 Write-Host ""
 Write-Host "Import table:"
@@ -137,11 +147,21 @@ foreach ($dll in $imports.Keys) {
     foreach ($fn in $fns) {
         if ($deniedFunctions -contains $fn) {
             $problems.Add("Entry point '$fn' (from $dll) is not exported on Windows 7")
+        } elseif ($warnFunctions.ContainsKey($fn)) {
+            $warnings.Add("Entry point '$fn' (from $dll) $($warnFunctions[$fn])")
         }
     }
 }
 
 Write-Host ""
+if ($warnings.Count -gt 0) {
+    Write-Host "Windows 7 import audit warnings (the app starts only on an UPDATED Windows 7 SP1):" -ForegroundColor Yellow
+    foreach ($w in $warnings) {
+        Write-Host "  - $w" -ForegroundColor Yellow
+        Write-Host "::warning::$w"
+    }
+    Write-Host ""
+}
 if ($problems.Count -gt 0) {
     Write-Host "Windows 7 import audit FAILED:" -ForegroundColor Red
     foreach ($p in $problems) { Write-Host "  - $p" -ForegroundColor Red }

@@ -87,3 +87,16 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# ---------------------------------------------------------------------------
+# Windows 7 lane: `ctor` 0.8.0 (pulled in by tauri-utils for its cached
+# starting-binary path) picks the `.CRT$XCU` constructor section only when
+# `target_vendor = "pc"`, and hard-errors on anything else — the win7 targets
+# report vendor `win7`. `patches/ctor` is a byte-for-byte copy of the crates.io
+# 0.8.0 release with that one cfg widened to accept `win7` too (see the README
+# there). It resolves to the same version, so the Windows 10/11, macOS and
+# Linux builds compile identical code. Drop the patch once tauri-utils moves to
+# a ctor release that keys off `target_os = "windows"`.
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+ctor = { path = "patches/ctor" }
